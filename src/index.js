@@ -17,8 +17,49 @@ const LOG_LEVEL = {
     DEBUG: 3
 };
 
-// 現在のログレベル（必要に応じて変更）
-const CURRENT_LOG_LEVEL = LOG_LEVEL.ERROR;
+// ロギングレベルをコマンドライン引数または環境変数から取得する関数
+function getLogLevel() {
+    // コマンドライン引数からロギングレベルを取得
+    const args = process.argv.slice(2);
+    for (const arg of args) {
+        if (arg.startsWith('--log-level=')) {
+            const level = arg.split('=')[1].toUpperCase();
+            if (LOG_LEVEL.hasOwnProperty(level)) {
+                console.log(`コマンドライン引数からログレベルを設定: ${level}`);
+                return LOG_LEVEL[level];
+            }
+            
+            // 数値での指定も許可
+            const numLevel = parseInt(level, 10);
+            if (!isNaN(numLevel) && numLevel >= 0 && numLevel <= 3) {
+                console.log(`コマンドライン引数からログレベルを設定: ${numLevel}`);
+                return numLevel;
+            }
+        }
+    }
+    
+    // 環境変数からロギングレベルを取得
+    if (process.env.LOG_LEVEL) {
+        const level = process.env.LOG_LEVEL.toUpperCase();
+        if (LOG_LEVEL.hasOwnProperty(level)) {
+            console.log(`環境変数からログレベルを設定: ${level}`);
+            return LOG_LEVEL[level];
+        }
+        
+        // 数値での指定も許可
+        const numLevel = parseInt(process.env.LOG_LEVEL, 10);
+        if (!isNaN(numLevel) && numLevel >= 0 && numLevel <= 3) {
+            console.log(`環境変数からログレベルを設定: ${numLevel}`);
+            return numLevel;
+        }
+    }
+    
+    // デフォルトのロギングレベル
+    return LOG_LEVEL.ERROR;
+}
+
+// 現在のログレベルを設定
+const CURRENT_LOG_LEVEL = getLogLevel();
 
 // カスタムロガー関数
 const logger = {
@@ -2864,7 +2905,7 @@ function handleHTTPSProxy(clientSocket, targetHost, targetPort, head) {
                             
                             // URLを構築
                             const fullUrl = `https://${host}${path}`; // pathにはクエリパラメータも含まれる
-                                                        
+                                                         
                             const cacheFile = getCacheFileName(fullUrl);
                             
                             // キャッシュの確認
@@ -3102,7 +3143,7 @@ function handleHTTPSProxy(clientSocket, targetHost, targetPort, head) {
         });
         
         // 一時的なポートでTLSサーバー起動
-        tlsServer.listen(0, 'localhost', () => {
+        tlsServer.listen(0, () => {
             const tlsPort = tlsServer.address().port;
             logger.info(`TLSサーバーをポート ${tlsPort} で起動しました`);
             

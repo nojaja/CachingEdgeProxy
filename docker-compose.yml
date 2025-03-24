@@ -5,6 +5,9 @@ services:
     build: ./
     restart: always
     image: caching-edge-proxy:latest
+    environment:
+      TZ: Asia/Tokyo
+      LOG_LEVEL: ERROR
     ports:
       - 8000:8000/tcp
     volumes:
