@@ -205,8 +205,7 @@ const saveCache = async (cacheFile, cacheHeader, body) => {
         await fs.promises.chmod(`${cacheFile}.cache`, 0o666);
         await fs.promises.chmod(cacheFile, 0o666);
 
-        logger.log('キャッシュを保存しました:', `${cacheFile}.cache`,`${cacheFile}`);
-        logger.debug('キャッシュを保存しました:', cacheHeader.url);
+        logger.debug('キャッシュを保存しました:', cacheHeader.url, `${cacheFile}.cache`,`${cacheFile}`);
     } catch (err) {
         logger.error('キャッシュの保存エラー:', err);
     }

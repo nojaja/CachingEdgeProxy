@@ -14,7 +14,9 @@
     "test:index": "node scripts/cleanup-cache.js && jest src/index.test.js --verbose", 
     "test:e2e": "node scripts/cleanup-cache.js && jest src/e2e/proxy.test.js --verbose",
     "test:curl": "node scripts/cleanup-cache.js && jest src/e2e/proxy.curl.test.js --verbose",
-    "test:sequential": "node scripts/cleanup-cache.js && npm run test:certificates && npm run test:index && npm run test:e2e && npm run test:curl",
+    "test:playwright": "node scripts/cleanup-cache.js && jest src/e2e/proxy.playwright.test.js --verbose",
+    "test:playwright:ui": "node scripts/cleanup-cache.js && npx playwright test src/e2e/proxy.playwright.ui.test.js",
+    "test:sequential": "node scripts/cleanup-cache.js && npm run test:certificates && npm run test:index && npm run test:e2e && npm run test:curl && npm run test:playwright",
     "clean": "node scripts/cleanup-cache.js"
   },
   "keywords": [],
