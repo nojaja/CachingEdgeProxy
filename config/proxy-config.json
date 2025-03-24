@@ -1,0 +1,12 @@
+{
+    "whitelistedDomains": [
+        "example.com",
+        "regex:(.+)\\.example\\.com"
+    ],
+    "proxyPort": 8000,
+    "https": {
+        "certPath": "./certs/proxy-ca.crt",
+        "keyPath": "./certs/proxy-ca.key",
+        "enabled": true
+    }
+}
