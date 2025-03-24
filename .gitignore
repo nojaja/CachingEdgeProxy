@@ -137,3 +137,7 @@ dist
 /certs
 /cache
 /package-lock.json
+
+# Additional cache directories
+cache/
+.DS_Store

@@ -181,8 +181,9 @@ const loadCache = async (cacheFile) => {
         
         // キャッシュファイルが破損している場合は削除する
         try {
-            logger.warn(`破損したキャッシュファイルを削除: ${cacheFile}`);
+            logger.error(`破損したキャッシュファイルを削除: ${cacheFile}`);
             await fs.promises.unlink(cacheFile);
+            await fs.promises.unlink(`${cacheFile}.cache`);
         } catch (unlinkErr) {
             logger.error('キャッシュファイル削除エラー:', unlinkErr);
         }
@@ -197,10 +198,14 @@ const saveCache = async (cacheFile, cacheHeader, body) => {
         const cacheDir = path.dirname(cacheFile);
         const filename = path.basename(cacheFile);
         await fs.promises.mkdir(cacheDir, { recursive: true });
+        await fs.promises.chmod(cacheDir, 0o777);
         cacheHeader.href=filename;
         await fs.promises.writeFile(`${cacheFile}.cache`, JSON.stringify(cacheHeader, null, 2));
         await fs.promises.writeFile(cacheFile, body);
+        await fs.promises.chmod(`${cacheFile}.cache`, 0o666);
+        await fs.promises.chmod(cacheFile, 0o666);
 
+        logger.log('キャッシュを保存しました:', `${cacheFile}.cache`,`${cacheFile}`);
         logger.debug('キャッシュを保存しました:', cacheHeader.url);
     } catch (err) {
         logger.error('キャッシュの保存エラー:', err);
@@ -264,19 +269,17 @@ const handleProxyRequest = async (clientReq, clientRes, options, isWhitelisted, 
                 
                 logger.debug(`ホワイトリスト対象でキャッシュ予定: ${normalizedUrl}, データ長: ${responseData.length}バイト`);
                 
-                const cacheData = {
+                const cacheHeader = {
                     url: normalizedUrl,
                     statusCode: proxyRes.statusCode,
                     headers: proxyRes.headers,
-                    data: responseData.toString('base64')
+                    //data: responseData.toString('base64')
                 };
 
                 try {
-                    const cacheDir = path.dirname(cacheFile);
-                    await fs.promises.mkdir(cacheDir, { recursive: true });
-                    await fs.promises.chmod(cacheDir, 0o777);
-                    await fs.promises.writeFile(cacheFile, JSON.stringify(cacheData, null, 2));
-                    await fs.promises.chmod(cacheFile, 0o666);
+                    // キャッシュを保存
+                    const cacheFile = getCacheFileName(normalizedUrl);
+                    await saveCache(cacheFile, cacheHeader, responseData);
                     logger.debug('キャッシュ保存完了:', normalizedUrl);
                     
                     // キャッシュ保存カウンターを更新
@@ -1663,11 +1666,36 @@ setInterval(() => {
     });
 }, 60000); // 1分ごとに出力に変更
 
-const port = config.proxyPort || 8000;
+// 引数からポートを取得するよう修正
+
+// コマンドライン引数からポートを取得
+function getPortFromArgs() {
+  const args = process.argv.slice(2);
+  for (const arg of args) {
+    if (arg.startsWith('--port=')) {
+      const port = parseInt(arg.split('=')[1], 10);
+      if (!isNaN(port) && port > 0 && port < 65536) {
+        return port;
+      }
+    }
+  }
+  // 環境変数からも取得を試みる
+  if (process.env.PORT) {
+    const port = parseInt(process.env.PORT, 10);
+    if (!isNaN(port) && port > 0 && port < 65536) {
+      return port;
+    }
+  }
+  // デフォルト値
+  return 8000;
+}
+
+// サーバー起動時のポート設定
+const PORT = getPortFromArgs();
 
 server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-        logger.error(`ポート ${port} は既に使用中です`);
+        logger.error(`ポート ${PORT} は既に使用中です`);
     } else {
         logger.error('サーバーエラー:', err);
     }
@@ -1749,8 +1777,8 @@ const cleanup = () => {
 process.on('SIGTERM', cleanup);
 process.on('SIGINT', cleanup);
 
-server.listen(port, () => {
-    logger.log(`プロキシサーバーが起動しました - ポート ${port}`);
+server.listen(PORT, () => {
+    logger.log(`プロキシサーバーが起動しました - ポート ${PORT}`);
 });
 
 // 統計とヘルスチェック用のエンドポイントを追加
@@ -2590,7 +2618,7 @@ function createSimpleTunnel(clientSocket, targetHost, targetPort, head) {
                     targetSocket.pause();
                     clientSocket.once('drain', () => {
                         // ソケットがまだ有効であれば再開
-                        if (targetSocket && targetSocket.readable) {
+                        if (targetSocket.readable) {
                             targetSocket.resume();
                         }
                     });
