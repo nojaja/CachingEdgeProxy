@@ -53,6 +53,11 @@ npm install
 npm start
 ```
 
+## コンテナの作成
+```
+docker compose up -d --build
+
+```
 ## ブラウザの設定
 
 お使いのブラウザのプロキシ設定で、HTTPおよびHTTPSプロキシとして `localhost:8000`（または設定したポート）を指定してください。

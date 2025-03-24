@@ -1,0 +1,19 @@
+name: Caching-Edge-Proxy
+services:
+  CachingEdgeProxy01:
+    container_name: Caching-Edge-Proxy
+    build: ./
+    restart: always
+    image: caching-edge-proxy:latest
+    ports:
+      - 8000:8000/tcp
+    volumes:
+      - ./cache:/usr/src/app/cache
+      - ./config:/usr/src/app/config
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1000m
