@@ -10,10 +10,10 @@ let config;
 let proxyPort;
 
 // 設定ファイルのパス
-const CONFIG_PATH = path.resolve(__dirname, '..', 'config', 'proxy-config.json');
+const CONFIG_PATH = path.resolve(__dirname, '../../', 'config', 'proxy-config.json');
 
 // キャッシュディレクトリのパス
-const CACHE_DIR = path.resolve(__dirname, '..', 'cache');
+const CACHE_DIR = path.resolve(__dirname, '../../', 'cache');
 
 // 空きポートを見つける関数
 const findAvailablePort = async (startPort = 8100) => {
@@ -165,7 +165,7 @@ describe('プロキシサーバーのテスト', () => {
         }
 
         // プロキシサーバーを起動（動的ポートを使用）
-        server = spawn('node', [path.resolve(__dirname, 'index.js'), `--port=${proxyPort}`], {
+        server = spawn('node', [path.resolve(__dirname, `../`, 'index.js'), `--port=${proxyPort}`], {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: {
                 ...process.env,

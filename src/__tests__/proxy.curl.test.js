@@ -172,6 +172,17 @@ const cleanupCacheDir = async (dir) => {
     }
 };
 
+// 安全なcurl実行関数を追加
+const execCurlAsync = async (command) => {
+    // curlコマンドの実行時のみ一時的に環境変数を設定
+    return execAsync(command, {
+        env: {
+            ...process.env,
+            NODE_TLS_REJECT_UNAUTHORIZED: '0' // curl実行時のみ自己署名証明書の検証を無効化
+        }
+    });
+};
+
 beforeAll(async () => {
     // 設定を読み込み
     const config = JSON.parse(await fs.readFile(CONFIG_PATH, 'utf8'));
@@ -191,14 +202,15 @@ beforeAll(async () => {
     proxyPort = await findAvailablePort();
     console.log(`テスト用ポート: ${proxyPort}を使用します`);
 
-    // プロキシサーバーを起動
+    // プロキシサーバーを起動 - NODE_TLS_REJECT_UNAUTHORIZED環境変数を設定しない
     proxyServer = spawn('node', [
         path.resolve(__dirname, '../index.js'),
         `--port=${proxyPort}`
     ], {
         env: {
             ...process.env,
-            PORT: proxyPort.toString()
+            PORT: proxyPort.toString(),
+            // NODE_TLS_REJECT_UNAUTHORIZED環境変数を設定しない
         }
     });
 
@@ -237,11 +249,11 @@ test('HTTPでホワイトリストドメイン（example.com）へのアクセ�
         const testUrl = `http://example.com/`;
         
         // プロキシサーバーのキャッシュをクリアするため、まず別のURLにアクセス
-        await execAsync(`curl -x http://localhost:${proxyPort} "http://example.com/test-${Date.now()}" -I`);
+        await execCurlAsync(`curl -x http://localhost:${proxyPort} "http://example.com/test-${Date.now()}" -I`);
         await new Promise(resolve => setTimeout(resolve, 1000));
         
         // テスト用URLの初回アクセス
-        const { stdout: output1 } = await execAsync(
+        const { stdout: output1 } = await execCurlAsync(
             `curl -x http://localhost:${proxyPort} "${testUrl}" -I -H "Cache-Control: no-cache"`
         );
         const headers1 = parseHeaders(output1);
@@ -253,7 +265,7 @@ test('HTTPでホワイトリストドメイン（example.com）へのアクセ�
         await new Promise(resolve => setTimeout(resolve, 5000));
 
         // 2回目のアクセス（同じURLでキャッシュヒット）
-        const { stdout: output2 } = await execAsync(
+        const { stdout: output2 } = await execCurlAsync(
             `curl -x http://localhost:${proxyPort} "${testUrl}" -I`
         );
         const headers2 = parseHeaders(output2);
@@ -279,7 +291,7 @@ test('HTTPSでホワイトリストドメイン（example.com）へのアクセ�
             
             const command = `curl -v -x http://localhost:${proxyPort} --insecure https://example.com -I --proxy-insecure --max-time 30 --connect-timeout 10 --max-redirs 5 --keepalive-time 20 --retry 2 --retry-delay 1 --tlsv1.2 --http1.1 --ssl-no-revoke`;
             
-            const { stdout, stderr } = await execAsync(command);
+            const { stdout, stderr } = await execCurlAsync(command);
             
             // デバッグ情報の出力
             console.log('Curl Debug Output:', {
@@ -333,7 +345,7 @@ test('エラーケース：無効なホスト名', async () => {
     let result;
     let error;
     try {
-        result = await execAsync(command);
+        result = await execCurlAsync(command);
     } catch (err) {
         error = err;
     }
@@ -391,7 +403,7 @@ test('エラーケース：ホストヘッダーなし', async () => {
     try {
         const command = `curl -v -x http://localhost:${proxyPort} http://example.com -H Host: -I`;
         
-        const result = await execAsync(command);
+        const result = await execCurlAsync(command);
         console.log(`ホストヘッダーなしテスト結果 - ステータスコード: ${result.stdout.includes('HTTP/1.1 400') ? '400' : '不明'}`);
         
         const statusLine = result.stdout.split('\n').find(line => line.includes('HTTP/'));
@@ -415,7 +427,7 @@ test('非ホワイトリストドメイン（httpbin.org）へのアクセス', 
     console.log(`非ホワイトリストドメインテスト - ポート: ${proxyPort}`);
     
     try {
-        const { stdout } = await execAsync(
+        const { stdout } = await execCurlAsync(
             `curl -x http://localhost:${proxyPort} http://httpbin.org -I`
         );
         const headers = parseHeaders(stdout);
@@ -488,7 +500,7 @@ test('キャッシュファイルの確認', async () => {
         };
 
         // example.comにアクセス
-        await execAsync(`curl -x http://localhost:${proxyPort} http://example.com -I`);
+        await execCurlAsync(`curl -x http://localhost:${proxyPort} http://example.com -I`);
         console.log(`キャッシュファイル確認 - アクセス完了: ${url}`);
 
         // キャッシュファイルが作成されるまで待機

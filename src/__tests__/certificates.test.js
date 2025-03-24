@@ -1,11 +1,11 @@
 const fs = require('fs').promises;
 const path = require('path');
-const CertificateManager = require('./certificates');
+const CertificateManager = require('../certificates');
 
 describe('CertificateManager', () => {
   const testConfig = {
-    certPath: './test-certs/test.crt',
-    keyPath: './test-certs/test.key'
+    certPath: './../test-certs/test.crt',
+    keyPath: './../test-certs/test.key'
   };
   let certManager;
 

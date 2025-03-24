@@ -387,8 +387,8 @@ const SIMPLIFIED_MODE = true;       // シンプルモードを有効化（よ�
 const USE_PREFETCH = true;          // ホワイトリストドメインのトップページを事前にキャッシュ
 const USE_MITM = false;             // Man-in-the-middle機能を無効化（トラブル対応）
 
-// SSL証明書検証の無効化設定（クライアントからの接続のため必要）
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+// SSL証明書検証の無効化設定を削除
+// process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // HTTPSレスポンスをキャプチャしてキャッシュする - クエリパラメータを含める
 function setupHttpsResponseCapture(targetSocket, clientSocket, normalizedUrl) {

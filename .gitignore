@@ -141,3 +141,4 @@ dist
 # Additional cache directories
 cache/
 .DS_Store
+/playwright-report
