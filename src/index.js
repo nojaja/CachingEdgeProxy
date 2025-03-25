@@ -10,6 +10,7 @@ const CertificateManager = require('./certificates');
 const { Logger, LOG_LEVEL } = require('./logger');
 const WhitelistManager = require('./whitelist-manager');
 const CacheManager = require('./cache-manager');
+const StatisticsCollector = require('./statistics-collector');
 
 // ロガーのインスタンスを作成
 const logger = new Logger(Logger.getLogLevelFromEnv());
@@ -32,13 +33,23 @@ whitelistManager.loadFromConfig(config);
 const CACHE_DIR = path.join(__dirname, '..', 'cache');
 const cacheManager = new CacheManager(CACHE_DIR, logger);
 
+// 統計収集器の初期化
+const statsCollector = new StatisticsCollector(logger);
+
 // ホワイトリストドメインの設定からクラスを作成
 const whitelistedDomains = whitelistManager.domains;
 const whitelistedRegexPatterns = whitelistManager.regexPatterns;
 
 // キャッシュディレクトリの初期化
 const initializeCacheDir = async () => {
-    await cacheManager.initialize();
+    try {
+        await fs.promises.mkdir(CACHE_DIR, { recursive: true });
+        await fs.promises.chmod(CACHE_DIR, 0o777);
+        logger.log('キャッシュディレクトリを初期化しました');
+    } catch (err) {
+        logger.error('キャッシュディレクトリの初期化エラー:', err);
+        throw err;
+    }
 };
 
 // 起動時にキャッシュディレクトリを初期化
@@ -71,14 +82,66 @@ const httpsOptions = {
     }
 })();
 
-// キャッシュのロード - CacheManagerの対応するメソッドを使用
+// キャッシュのロード - エラー時にファイル削除を追加
 const loadCache = async (cacheFile) => {
-    return await cacheManager.loadCache(cacheFile);
+    try {
+        const data = await fs.promises.readFile(`${cacheFile}.cache`, 'utf8');
+        const cache = JSON.parse(data);
+        if(cache.href){
+            const cacheDir = path.dirname(cacheFile);
+            const filename = path.join(cacheDir, cache.href);
+            const body = await fs.promises.readFile(filename);
+            cache.data = body.toString('base64');
+        }
+
+        logger.debug('キャッシュをロードしました:', cache.url);
+        return cache;
+    } catch (err) {
+        logger.error('キャッシュの読み込みエラー:', err);
+        
+        // キャッシュファイルが破損している場合は削除する
+        try {
+            logger.error(`破損したキャッシュファイルを削除: ${cacheFile}`);
+            await fs.promises.unlink(cacheFile);
+            await fs.promises.unlink(`${cacheFile}.cache`);
+        } catch (unlinkErr) {
+            logger.error('キャッシュファイル削除エラー:', unlinkErr);
+        }
+        
+        return null;
+    }
 };
 
-// キャッシュの保存 - CacheManagerの対応するメソッドを使用
+// キャッシュの保存
 const saveCache = async (cacheFile, cacheHeader, body) => {
-    await cacheManager.saveCache(cacheFile, cacheHeader, body);
+    try {
+        const cacheDir = path.dirname(cacheFile);
+        const filename = path.basename(cacheFile);
+        await fs.promises.mkdir(cacheDir, { recursive: true });
+        await fs.promises.chmod(cacheDir, 0o777);
+        cacheHeader.href=filename;
+        await fs.promises.writeFile(`${cacheFile}.cache`, JSON.stringify(cacheHeader, null, 2));
+        await fs.promises.writeFile(cacheFile, body);
+        await fs.promises.chmod(`${cacheFile}.cache`, 0o666);
+        await fs.promises.chmod(cacheFile, 0o666);
+
+        logger.debug('キャッシュを保存しました:', cacheHeader.url, `${cacheFile}.cache`,`${cacheFile}`);
+    } catch (err) {
+        logger.error('キャッシュの保存エラー:', err);
+    }
+};
+
+// 定期的な統計情報のログ出力を開始
+statsCollector.startPeriodicLogging(CACHE_DIR);
+
+// 新しい接続が確立されたときにセットに追加
+function trackConnection(socket) {
+    return statsCollector.trackConnection(socket);
+}
+
+// ホワイトリストの確認用ヘルパー関数 (正規表現対応版)
+const isHostWhitelisted = (host) => {
+    return whitelistManager.isHostWhitelisted(host);
 };
 
 // プロキシリクエストの処理の修正 - レスポンス完了時に接続を終了
@@ -472,144 +535,6 @@ const handleHttpsCache = async (clientSocket, targetSocket, requestInfo) => {
     }
     
     return false;
-};
-
-// 統計情報収集クラス
-class StatisticsCollector {
-    constructor() {
-        this.http = {
-            requests: 0,
-            cacheHits: 0,
-            cacheMisses: 0
-        };
-        
-        this.https = {
-            connections: 0,
-            requests: 0,
-            cacheHits: 0,
-            cacheMisses: 0,
-            cacheSaves: 0
-        };
-        
-        this.activeConnections = new Set();
-    }
-    
-    /**
-     * アクティブな接続を追跡
-     * @param {net.Socket} socket ソケットオブジェクト
-     * @returns {net.Socket} 同じソケットオブジェクト
-     */
-    trackConnection(socket) {
-        this.activeConnections.add(socket);
-        
-        // 接続が閉じられたときにセットから削除
-        socket.once('close', () => {
-            this.activeConnections.delete(socket);
-            logger.info(`アクティブ接続が削除されました。残り: ${this.activeConnections.size}`);
-        });
-        
-        return socket;
-    }
-    
-    /**
-     * HTTP統計情報の更新
-     * @param {string} type 統計タイプ (requests|cacheHits|cacheMisses)
-     * @param {number} value 増加量 (デフォルト: 1)
-     */
-    incrementHttpStat(type, value = 1) {
-        if (this.http.hasOwnProperty(type)) {
-            this.http[type] += value;
-        }
-    }
-    
-    /**
-     * HTTPS統計情報の更新
-     * @param {string} type 統計タイプ (connections|requests|cacheHits|cacheMisses|cacheSaves)
-     * @param {number} value 増加量 (デフォルト: 1)
-     */
-    incrementHttpsStat(type, value = 1) {
-        if (this.https.hasOwnProperty(type)) {
-            this.https[type] += value;
-        }
-    }
-    
-    /**
-     * 統計情報を取得
-     * @returns {Object} 統計情報
-     */
-    getStats() {
-        return {
-            http: { ...this.http },
-            https: { ...this.https },
-            activeConnections: this.activeConnections.size,
-            timestamp: new Date().toISOString(),
-            uptime: process.uptime(),
-            memoryUsage: process.memoryUsage()
-        };
-    }
-    
-    /**
-     * 統計情報をログに出力
-     */
-    logStats() {
-        logger.info('==== キャッシュ利用状況 ====');
-        logger.info(`HTTP キャッシュヒット: ${this.http.cacheHits}, ミス: ${this.http.cacheMisses}`);
-        logger.info(`HTTPS キャッシュヒット: ${this.https.cacheHits}, ミス: ${this.https.cacheMisses}, 保存: ${this.https.cacheSaves}`);
-        logger.info(`アクティブ接続数: ${this.activeConnections.size}`);
-        
-        logger.info('==== プロキシ統計情報 ====');
-        logger.info(`HTTP: ${this.http.requests}件, HTTPS: ${this.https.requests}件`);
-        logger.info(`キャッシュヒット: ${this.http.cacheHits + this.https.cacheHits}, ミス: ${this.http.cacheMisses + this.https.cacheMisses}, 保存: ${this.https.cacheSaves}`);
-    }
-    
-    /**
-     * キャッシュファイル数をログに出力
-     * @param {string} cacheDir キャッシュディレクトリパス
-     */
-    async logCacheFileCount(cacheDir) {
-        try {
-            const files = await fs.promises.readdir(cacheDir);
-            logger.info(`キャッシュファイル数: ${files.length}`);
-        } catch (err) {
-            logger.error('キャッシュディレクトリ読み取りエラー:', err);
-        }
-    }
-    
-    /**
-     * 定期的なログ出力を開始
-     * @param {string} cacheDir キャッシュディレクトリパス
-     */
-    startPeriodicLogging(cacheDir) {
-        // キャッシュ統計情報の定期出力（30秒ごと）
-        setInterval(() => {
-            this.logStats();
-            this.logCacheFileCount(cacheDir);
-        }, 30000);
-    }
-}
-
-// 既存のstats変数とhttpsStats変数を置き換える
-const statsCollector = new StatisticsCollector();
-
-// 定期的な統計情報のログ出力を開始（既存の同様のコードは削除すること）
-statsCollector.startPeriodicLogging(CACHE_DIR);
-
-// 既存のtrackConnection関数を置き換える
-// 新しい接続が確立されたときにセットに追加
-function trackConnection(socket) {
-    return statsCollector.trackConnection(socket);
-}
-
-// 下記の既存の変数と関連コードは削除すること（コメントアウトしておく）
-// const stats = { ... }
-// const httpsStats = { ... }
-// const activeConnections = new Set();
-// setInterval(() => { ... }, 30000); // 30秒ごとの統計出力
-// setInterval(() => { ... }, 60000); // 1分ごとのプロキシ統計出力
-
-// ホワイトリストの確認用ヘルパー関数 (正規表現対応版)
-const isHostWhitelisted = (host) => {
-    return whitelistManager.isHostWhitelisted(host);
 };
 
 // 最もシンプルな実装のTLSトンネルを使用
@@ -1719,8 +1644,6 @@ server.on('request', (req, res) => {
 
 // ホワイトリスト確認API（デバッグ用）
 server.on('request', (req, res) => {
-    // ... existing code ...
-
     // ホワイトリスト確認
     if (req.url === '/check-whitelist' && req.headers.host.includes('localhost')) {
         const host = req.headers['x-check-host'];
@@ -1787,10 +1710,97 @@ server.on('request', (req, res) => {
         });
         return;
     }
+
+    // キャッシュチェック
+    if (req.url.startsWith('/check-cache') && req.headers.host.includes('localhost')) {
+        const urlParam = new URL(`http://localhost${req.url}`).searchParams.get('url');
+        if (!urlParam) {
+            res.writeHead(400, {'Content-Type': 'text/plain'});
+            res.end('url parameter is required');
+            return;
+        }
+        
+        const cacheFile = getCacheFileName(urlParam);
+        fs.access(`${cacheFile}.cache`, fs.constants.F_OK, (err) => {
+            if (err) {
+                res.writeHead(200, {'Content-Type': 'application/json'});
+                res.end(JSON.stringify({
+                    cached: false,
+                    url: urlParam,
+                    message: 'Cache not found'
+                }));
+                return;
+            }
+            
+            loadCache(cacheFile)
+                .then(cache => {
+                    res.writeHead(200, {'Content-Type': 'application/json'});
+                    if (cache) {
+                        res.end(JSON.stringify({
+                            cached: true,
+                            url: urlParam,
+                            statusCode: cache.statusCode,
+                            contentType: cache.headers['content-type'],
+                            dataSize: cache.data ? Buffer.from(cache.data, 'base64').length : 'unknown'
+                        }));
+                    } else {
+                        res.end(JSON.stringify({
+                            cached: false,
+                            url: urlParam,
+                            message: 'Invalid cache data'
+                        }));
+                    }
+                })
+                .catch(error => {
+                    res.writeHead(500, {'Content-Type': 'application/json'});
+                    res.end(JSON.stringify({
+                        error: error.message,
+                        url: urlParam
+                    }));
+                });
+        });
+        return;
+    }
+    
+    // キャッシュ更新
+    if (req.url.startsWith('/update-cache') && req.headers.host.includes('localhost')) {
+        const urlParam = new URL(`http://localhost${req.url}`).searchParams.get('url');
+        if (!urlParam) {
+            res.writeHead(400, {'Content-Type': 'text/plain'});
+            res.end('url parameter is required');
+            return;
+        }
+        
+        directHttpsRequest(urlParam)
+            .then(response => {
+                res.writeHead(200, {'Content-Type': 'application/json'});
+                res.end(JSON.stringify({
+                    success: true,
+                    url: urlParam,
+                    statusCode: response.statusCode,
+                    contentType: response.headers['content-type'],
+                    dataSize: response.data.length,
+                    fromCache: response.fromCache
+                }));
+            })
+            .catch(error => {
+                res.writeHead(500, {'Content-Type': 'application/json'});
+                res.end(JSON.stringify({
+                    error: error.message,
+                    url: urlParam
+                }));
+            });
+        return;
+    }
 });
 
 // メインの説明ページのHTMLを更新
 server.on('request', (req, res) => {
+    // 別のrequestハンドラで既に処理された場合は何もしない
+    if (res.headersSent || res.writableEnded) {
+        return;
+    }
+
     if (req.url === '/' && req.headers.host.includes('localhost')) {
         res.writeHead(200, {'Content-Type': 'text/html'});
         const stats = statsCollector.getStats();
@@ -1871,6 +1881,7 @@ server.on('request', (req, res) => {
                     <h2>管理</h2>
                     <p><a href="/clear-cache">キャッシュをクリア</a></p>
                     <p><a href="/proxy-stats">JSONで統計情報を表示</a></p>
+                    <p><a href="/health">ヘルスチェック</a></p>
                 </div>
                 
                 <script>
@@ -1926,7 +1937,17 @@ server.on('request', (req, res) => {
             </body>
             </html>
         `);
+        return;
     }
+
+    // ローカルホスト以外のリクエストは許可
+    if (!req.headers.host.includes('localhost:8000')) {
+        return;
+    }
+
+    // ローカルホストへの直接リクエストを拒否
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('直接のローカルホストへのリクエストは許可されていません');
 });
 
 // パッシブTLS分析をやめて単純に事前キャッシュを行う
