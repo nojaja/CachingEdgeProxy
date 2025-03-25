@@ -8,88 +8,10 @@ const tls = require('tls');
 const { URL } = require('url');
 const CertificateManager = require('./certificates');
 const { Logger, LOG_LEVEL } = require('./logger');
+const WhitelistManager = require('./whitelist-manager');
 
 // ロガーのインスタンスを作成
 const logger = new Logger(Logger.getLogLevelFromEnv());
-
-/**
- * ホワイトリスト管理クラス
- */
-class WhitelistManager {
-    constructor() {
-        this.domains = new Set();
-        this.regexPatterns = [];
-    }
-
-    /**
-     * 設定からホワイトリスト情報をロード
-     * @param {Object} config 設定オブジェクト
-     */
-    loadFromConfig(config) {
-        if (Array.isArray(config.whitelistedDomains)) {
-            config.whitelistedDomains.forEach(domain => {
-                if (domain.startsWith('regex:')) {
-                    // 正規表現パターンの場合
-                    const pattern = domain.substring(6); // 'regex:' を除去
-                    try {
-                        const regex = new RegExp(pattern, 'i'); // 大文字小文字を区別しない
-                        this.regexPatterns.push(regex);
-                        logger.log(`正規表現パターンをホワイトリストに追加: ${pattern}`);
-                    } catch (err) {
-                        logger.error(`無効な正規表現パターン: ${pattern}`, err);
-                    }
-                } else {
-                    // 通常のドメイン名の場合
-                    this.domains.add(domain);
-                    logger.log(`ドメインをホワイトリストに追加: ${domain}`);
-                }
-            });
-        }
-    }
-
-    /**
-     * ホストがホワイトリストに含まれるかチェック
-     * @param {string} host ホスト名
-     * @returns {boolean} ホワイトリストに含まれる場合はtrue
-     */
-    isHostWhitelisted(host) {
-        if (!host) return false;
-        
-        // ホスト名からポート部分を削除
-        const cleanHost = host.split(':')[0];
-        
-        // 通常のホワイトリストをチェック
-        if (this.domains.has(cleanHost)) {
-            return true;
-        }
-        
-        // 正規表現パターンをチェック
-        for (const regex of this.regexPatterns) {
-            if (regex.test(cleanHost)) {
-                logger.info(`正規表現パターンにマッチしました: ${cleanHost} -> ${regex}`);
-                return true;
-            }
-        }
-        
-        return false;
-    }
-    
-    /**
-     * ホワイトリストドメインをすべて取得
-     * @returns {string[]} ドメイン配列
-     */
-    getAllDomains() {
-        return Array.from(this.domains);
-    }
-    
-    /**
-     * 正規表現パターンをすべて取得
-     * @returns {string[]} 正規表現パターン配列
-     */
-    getAllRegexPatterns() {
-        return this.regexPatterns.map(r => r.toString());
-    }
-}
 
 /**
  * キャッシュ管理クラス
@@ -369,7 +291,7 @@ try {
 }
 
 // ホワイトリストの設定とキャッシュマネージャーの初期化
-const whitelistManager = new WhitelistManager();
+const whitelistManager = new WhitelistManager(logger);
 whitelistManager.loadFromConfig(config);
 
 // キャッシュディレクトリのパスを設定
@@ -1002,25 +924,7 @@ function trackConnection(socket) {
 
 // ホワイトリストの確認用ヘルパー関数 (正規表現対応版)
 const isHostWhitelisted = (host) => {
-    if (!host) return false;
-    
-    // ホスト名からポート部分を削除
-    const cleanHost = host.split(':')[0];
-    
-    // 通常のホワイトリストをチェック
-    if (whitelistedDomains.has(cleanHost)) {
-        return true;
-    }
-    
-    // 正規表現パターンをチェック
-    for (const regex of whitelistedRegexPatterns) {
-        if (regex.test(cleanHost)) {
-            logger.info(`正規表現パターンにマッチしました: ${cleanHost} -> ${regex}`);
-            return true;
-        }
-    }
-    
-    return false;
+    return whitelistManager.isHostWhitelisted(host);
 };
 
 // 最もシンプルな実装のTLSトンネルを使用
