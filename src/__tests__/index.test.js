@@ -140,6 +140,53 @@ const safelyKillServer = async (serverProcess) => {
     });
 };
 
+// リトライ機能付きのHTTPリクエスト関数 - グローバルスコープに移動
+const retryableRequest = async (options, maxRetries = 3, retryDelay = 1000) => {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            debug(`リクエスト試行 ${attempt}/${maxRetries}: ${options.method || 'GET'} ${options.host}:${options.port}${options.path}`);
+            
+            return await new Promise((resolve, reject) => {
+                const req = http.request(options, async res => {
+                    const chunks = [];
+                    
+                    res.on('data', chunk => chunks.push(chunk));
+                    
+                    res.on('end', () => {
+                        const data = Buffer.concat(chunks).toString();
+                        resolve({ 
+                            statusCode: res.statusCode, 
+                            headers: res.headers, 
+                            data 
+                        });
+                    });
+                });
+                
+                req.on('error', reject);
+                
+                req.on('timeout', () => {
+                    req.destroy();
+                    reject(new Error('リクエストタイムアウト'));
+                });
+                
+                req.end();
+            });
+        } catch (err) {
+            lastError = err;
+            debug(`リクエスト失敗 (${attempt}/${maxRetries}): ${err.message}`);
+            
+            if (attempt < maxRetries) {
+                debug(`${retryDelay}ms後にリトライします...`);
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            }
+        }
+    }
+    
+    throw lastError || new Error('すべてのリトライが失敗しました');
+};
+
 describe('プロキシサーバーのテスト', () => {
     beforeAll(async () => {
         // 使用可能なポートを見つける
@@ -201,53 +248,6 @@ describe('プロキシサーバーのテスト', () => {
             await new Promise(resolve => setTimeout(resolve, 3000));
         }
     }, 15000); // クリーンアップのタイムアウトも延長
-
-    // リトライ機能付きのHTTPリクエスト関数
-    const retryableRequest = async (options, maxRetries = 3, retryDelay = 1000) => {
-        let lastError;
-        
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                debug(`リクエスト試行 ${attempt}/${maxRetries}: ${options.method || 'GET'} ${options.host}:${options.port}${options.path}`);
-                
-                return await new Promise((resolve, reject) => {
-                    const req = http.request(options, async res => {
-                        const chunks = [];
-                        
-                        res.on('data', chunk => chunks.push(chunk));
-                        
-                        res.on('end', () => {
-                            const data = Buffer.concat(chunks).toString();
-                            resolve({ 
-                                statusCode: res.statusCode, 
-                                headers: res.headers, 
-                                data 
-                            });
-                        });
-                    });
-                    
-                    req.on('error', reject);
-                    
-                    req.on('timeout', () => {
-                        req.destroy();
-                        reject(new Error('リクエストタイムアウト'));
-                    });
-                    
-                    req.end();
-                });
-            } catch (err) {
-                lastError = err;
-                debug(`リクエスト失敗 (${attempt}/${maxRetries}): ${err.message}`);
-                
-                if (attempt < maxRetries) {
-                    debug(`${retryDelay}ms後にリトライします...`);
-                    await new Promise(resolve => setTimeout(resolve, retryDelay));
-                }
-            }
-        }
-        
-        throw lastError || new Error('すべてのリトライが失敗しました');
-    };
 
     test('ローカルホストへの直接アクセスを拒否する', async () => {
         const options = {
@@ -446,4 +446,193 @@ describe('プロキシサーバーのテスト', () => {
             throw err;
         }
     }, 15000);
+});
+
+describe('コマンドライン引数のテスト', () => {
+  // 各テスト後に他のテストケースに影響を与えないようにクリーンアップ
+  let testServer;
+  
+  afterEach(async () => {
+    if (testServer) {
+      await safelyKillServer(testServer);
+      testServer = null;
+      // サーバー終了後、ポートが解放されるまで待機
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }, 10000);
+
+  test('コマンドライン引数によるログレベルの設定', async () => {
+    // 使用可能なポートを見つける
+    const testPort = await findAvailablePort(8400);
+    debug(`ログレベルテスト用ポート: ${testPort}を使用`);
+    
+    // DEBUGログレベルの引数を指定
+    testServer = spawn('node', [
+      path.resolve(__dirname, '../', 'index.js'),
+      `--port=${testPort}`,
+      `--log-level=DEBUG`
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        PORT: testPort.toString(),
+      }
+    });
+    
+    // 標準出力を収集
+    const logOutput = [];
+    testServer.stdout.on('data', (data) => {
+      const output = data.toString();
+      logOutput.push(output);
+      debug(`DEBUGログ出力: ${output}`);
+    });
+    
+    // サーバーの起動を待つ
+    try {
+      await waitForServer(testPort);
+      debug('DEBUGログレベル設定のサーバー起動完了');
+      
+      // サーバーが出力するログを収集する時間を少し待機
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // DEBUGレベルの場合、詳細なログ出力があるはず
+      // （例: コマンドライン引数からログレベルを設定というメッセージの存在を確認）
+      const combinedOutput = logOutput.join('');
+      expect(combinedOutput).toContain('コマンドライン引数からログレベルを設定'); 
+      
+      // DEBUGレベルでのみ出力される詳細情報が含まれているか確認
+      const hasDebugLevelOutput = 
+        combinedOutput.includes('キャッシュディレクトリを初期化しました') || 
+        combinedOutput.includes('証明書の初期化が完了しました') ||
+        combinedOutput.includes('サーバー起動');
+      
+      expect(hasDebugLevelOutput).toBe(true);
+      
+    } catch (err) {
+      console.error('ログレベル設定テストエラー:', err);
+      throw err;
+    }
+  }, 30000);
+
+  test('コマンドライン引数によるポートの設定', async () => {
+    // 使用可能なポートを明示的に見つける
+    const customPort = await findAvailablePort(8500);
+    debug(`カスタムポートテスト用ポート: ${customPort}を使用`);
+    
+    // 明示的にポートを指定してサーバーを起動
+    testServer = spawn('node', [
+      path.resolve(__dirname, '../', 'index.js'),
+      `--port=${customPort}`
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        // 環境変数PORTは設定しない（コマンドライン引数が優先されることを確認するため）
+        ...process.env,
+        // 環境変数からのポート設定を無効化
+        PORT: undefined
+      }
+    });
+    
+    // 標準出力を収集
+    const logOutput = [];
+    testServer.stdout.on('data', (data) => {
+      const output = data.toString();
+      logOutput.push(output);
+      debug(`ポート設定テスト出力: ${output}`);
+    });
+    
+    // サーバーの起動を待つ
+    try {
+      await waitForServer(customPort);
+      debug(`カスタムポート${customPort}でのサーバー起動確認完了`);
+      
+      // サーバーが出力するログを収集する時間を少し待機
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // 指定したポートでサーバーが起動していることを確認
+      const combinedOutput = logOutput.join('');
+      expect(combinedOutput).toContain(`ポート ${customPort}`);
+      
+      // 簡単なリクエストを送信して応答を確認
+      const options = {
+        host: 'localhost',
+        port: customPort,
+        path: '/health',
+        method: 'GET',
+        timeout: 5000
+      };
+      
+      const response = await retryableRequest(options);
+      expect(response.statusCode).toBe(200);
+      expect(response.data).toBe('OK');
+      
+    } catch (err) {
+      console.error('ポート設定テストエラー:', err);
+      throw err;
+    }
+  }, 30000);
+  
+  test('ログレベルとポート両方のコマンドライン引数設定', async () => {
+    // 使用可能なポートを明示的に見つける
+    const combinedPort = await findAvailablePort(8600);
+    debug(`両方の引数テスト用ポート: ${combinedPort}を使用`);
+    
+    // 両方の引数を指定してサーバーを起動
+    testServer = spawn('node', [
+      path.resolve(__dirname, '../', 'index.js'),
+      `--port=${combinedPort}`,
+      `--log-level=INFO`
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        // 環境変数を別の値に設定（コマンドライン引数が優先されるべき）
+        PORT: '9999',
+        LOG_LEVEL: 'ERROR'
+      }
+    });
+    
+    // 標準出力を収集
+    const logOutput = [];
+    testServer.stdout.on('data', (data) => {
+      const output = data.toString();
+      logOutput.push(output);
+      debug(`両方の引数テスト出力: ${output}`);
+    });
+    
+    // サーバーの起動を待つ
+    try {
+      await waitForServer(combinedPort);
+      debug(`両方の引数設定テスト - ポート${combinedPort}のサーバー起動確認完了`);
+      
+      // サーバーが出力するログを収集する時間を少し待機
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // 指定したポートでサーバーが起動していることを確認
+      const combinedOutput = logOutput.join('');
+      
+      // ポート設定が有効であることを確認
+      expect(combinedOutput).toContain(`ポート ${combinedPort}`);
+      expect(combinedOutput).not.toContain('ポート 9999');  // 環境変数のポートは使われていない
+      
+      // INFOログレベルの設定が有効であることを確認
+      expect(combinedOutput).toContain('コマンドライン引数からログレベルを設定');
+      
+      // 簡単なリクエストを送信して応答を確認
+      const options = {
+        host: 'localhost',
+        port: combinedPort,
+        path: '/health',
+        method: 'GET',
+        timeout: 5000
+      };
+      
+      const response = await retryableRequest(options);
+      expect(response.statusCode).toBe(200);
+      
+    } catch (err) {
+      console.error('両方の引数テストエラー:', err);
+      throw err;
+    }
+  }, 30000);
 });
