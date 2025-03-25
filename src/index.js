@@ -36,7 +36,7 @@ const cacheManager = new CacheManager(CACHE_DIR, logger);
 // 統計収集器の初期化
 const statsCollector = new StatisticsCollector(logger);
 
-// ホワイトリストドメインの設定からクラスを作成
+// ホワイトリストドメインはWhitelistManager経由で取得
 const whitelistedDomains = whitelistManager.domains;
 const whitelistedRegexPatterns = whitelistManager.regexPatterns;
 
@@ -98,7 +98,7 @@ function trackConnection(socket) {
     return statsCollector.trackConnection(socket);
 }
 
-// ホワイトリストの確認用ヘルパー関数 (正規表現対応版)
+// ホワイトリストの確認用ヘルパー関数は単純にwhitelistManagerに委譲
 const isHostWhitelisted = (host) => {
     return whitelistManager.isHostWhitelisted(host);
 };
@@ -1586,8 +1586,8 @@ server.on('request', (req, res) => {
         res.writeHead(200, {'Content-Type': 'application/json'});
         const statsData = {
             ...statsCollector.getStats(),
-            whitelistedDomains: Array.from(whitelistedDomains),
-            whitelistedRegexPatterns: whitelistedRegexPatterns.map(r => r.toString()),
+            whitelistedDomains: whitelistManager.getAllDomains(),
+            whitelistedRegexPatterns: whitelistManager.getAllRegexPatterns()
         };
         res.end(JSON.stringify(statsData, null, 2));
         return;
@@ -1609,12 +1609,12 @@ server.on('request', (req, res) => {
         if (host) {
             const isWhitelisted = isHostWhitelisted(host);
             
-            // どのルールでマッチしたか確認
+            // どのルールでマッチしたか確認 - WhitelistManagerから直接情報を取得
             let matchedBy = 'none';
-            if (whitelistedDomains.has(host)) {
+            if (whitelistManager.domains.has(host)) {
                 matchedBy = 'exact';
             } else {
-                for (const regex of whitelistedRegexPatterns) {
+                for (const regex of whitelistManager.regexPatterns) {
                     if (regex.test(host)) {
                         matchedBy = regex.toString();
                         break;
@@ -1627,8 +1627,8 @@ server.on('request', (req, res) => {
                 host,
                 isWhitelisted,
                 matchedBy,
-                whitelistedDomains: Array.from(whitelistedDomains),
-                whitelistedRegexPatterns: whitelistedRegexPatterns.map(r => r.toString())
+                whitelistedDomains: whitelistManager.getAllDomains(),
+                whitelistedRegexPatterns: whitelistManager.getAllRegexPatterns()
             }));
         } else {
             res.writeHead(400, {'Content-Type': 'text/plain'});
@@ -1819,11 +1819,11 @@ server.on('request', (req, res) => {
                     <h2>ホワイトリスト</h2>
                     <h3>完全一致ドメイン:</h3>
                     <ul>
-                        ${Array.from(whitelistedDomains).map(domain => `<li>${domain}</li>`).join('')}
+                        ${whitelistManager.getAllDomains().map(domain => `<li>${domain}</li>`).join('')}
                     </ul>
                     <h3>正規表現パターン:</h3>
                     <ul>
-                        ${whitelistedRegexPatterns.map(regex => `<li>${regex.toString()}</li>`).join('')}
+                        ${whitelistManager.getAllRegexPatterns().map(regex => `<li>${regex}</li>`).join('')}
                     </ul>
                 </div>
                 
@@ -3372,8 +3372,8 @@ server.on('request', (req, res) => {
         res.writeHead(200, {'Content-Type': 'application/json'});
         const statsData = {
             ...statsCollector.getStats(),
-            whitelistedDomains: Array.from(whitelistedDomains),
-            whitelistedRegexPatterns: whitelistedRegexPatterns.map(r => r.toString()),
+            whitelistedDomains: whitelistManager.getAllDomains(),
+            whitelistedRegexPatterns: whitelistManager.getAllRegexPatterns()
         };
         res.end(JSON.stringify(statsData, null, 2));
         return;
@@ -3395,12 +3395,12 @@ server.on('request', (req, res) => {
         if (host) {
             const isWhitelisted = isHostWhitelisted(host);
             
-            // どのルールでマッチしたか確認
+            // どのルールでマッチしたか確認 - WhitelistManagerから直接情報を取得
             let matchedBy = 'none';
-            if (whitelistedDomains.has(host)) {
+            if (whitelistManager.domains.has(host)) {
                 matchedBy = 'exact';
             } else {
-                for (const regex of whitelistedRegexPatterns) {
+                for (const regex of whitelistManager.regexPatterns) {
                     if (regex.test(host)) {
                         matchedBy = regex.toString();
                         break;
@@ -3413,8 +3413,8 @@ server.on('request', (req, res) => {
                 host,
                 isWhitelisted,
                 matchedBy,
-                whitelistedDomains: Array.from(whitelistedDomains),
-                whitelistedRegexPatterns: whitelistedRegexPatterns.map(r => r.toString())
+                whitelistedDomains: whitelistManager.getAllDomains(),
+                whitelistedRegexPatterns: whitelistManager.getAllRegexPatterns()
             }));
         } else {
             res.writeHead(400, {'Content-Type': 'text/plain'});
@@ -3605,11 +3605,11 @@ server.on('request', (req, res) => {
                     <h2>ホワイトリスト</h2>
                     <h3>完全一致ドメイン:</h3>
                     <ul>
-                        ${Array.from(whitelistedDomains).map(domain => `<li>${domain}</li>`).join('')}
+                        ${whitelistManager.getAllDomains().map(domain => `<li>${domain}</li>`).join('')}
                     </ul>
                     <h3>正規表現パターン:</h3>
                     <ul>
-                        ${whitelistedRegexPatterns.map(regex => `<li>${regex.toString()}</li>`).join('')}
+                        ${whitelistManager.getAllRegexPatterns().map(regex => `<li>${regex}</li>`).join('')}
                     </ul>
                 </div>
                 
