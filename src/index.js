@@ -86,6 +86,351 @@ const logger = {
     }
 };
 
+/**
+ * ホワイトリスト管理クラス
+ */
+class WhitelistManager {
+    constructor() {
+        this.domains = new Set();
+        this.regexPatterns = [];
+    }
+
+    /**
+     * 設定からホワイトリスト情報をロード
+     * @param {Object} config 設定オブジェクト
+     */
+    loadFromConfig(config) {
+        if (Array.isArray(config.whitelistedDomains)) {
+            config.whitelistedDomains.forEach(domain => {
+                if (domain.startsWith('regex:')) {
+                    // 正規表現パターンの場合
+                    const pattern = domain.substring(6); // 'regex:' を除去
+                    try {
+                        const regex = new RegExp(pattern, 'i'); // 大文字小文字を区別しない
+                        this.regexPatterns.push(regex);
+                        logger.log(`正規表現パターンをホワイトリストに追加: ${pattern}`);
+                    } catch (err) {
+                        logger.error(`無効な正規表現パターン: ${pattern}`, err);
+                    }
+                } else {
+                    // 通常のドメイン名の場合
+                    this.domains.add(domain);
+                    logger.log(`ドメインをホワイトリストに追加: ${domain}`);
+                }
+            });
+        }
+    }
+
+    /**
+     * ホストがホワイトリストに含まれるかチェック
+     * @param {string} host ホスト名
+     * @returns {boolean} ホワイトリストに含まれる場合はtrue
+     */
+    isHostWhitelisted(host) {
+        if (!host) return false;
+        
+        // ホスト名からポート部分を削除
+        const cleanHost = host.split(':')[0];
+        
+        // 通常のホワイトリストをチェック
+        if (this.domains.has(cleanHost)) {
+            return true;
+        }
+        
+        // 正規表現パターンをチェック
+        for (const regex of this.regexPatterns) {
+            if (regex.test(cleanHost)) {
+                logger.info(`正規表現パターンにマッチしました: ${cleanHost} -> ${regex}`);
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * ホワイトリストドメインをすべて取得
+     * @returns {string[]} ドメイン配列
+     */
+    getAllDomains() {
+        return Array.from(this.domains);
+    }
+    
+    /**
+     * 正規表現パターンをすべて取得
+     * @returns {string[]} 正規表現パターン配列
+     */
+    getAllRegexPatterns() {
+        return this.regexPatterns.map(r => r.toString());
+    }
+}
+
+/**
+ * キャッシュ管理クラス
+ */
+class CacheManager {
+    /**
+     * @param {string} cacheDir キャッシュディレクトリのパス
+     */
+    constructor(cacheDir) {
+        this.CACHE_DIR = cacheDir;
+    }
+
+    /**
+     * キャッシュディレクトリを初期化
+     */
+    async initialize() {
+        try {
+            await fs.promises.mkdir(this.CACHE_DIR, { recursive: true });
+            await fs.promises.chmod(this.CACHE_DIR, 0o777);
+            logger.log('キャッシュディレクトリを初期化しました');
+        } catch (err) {
+            logger.error('キャッシュディレクトリの初期化エラー:', err);
+            throw err;
+        }
+    }
+    
+    /**
+     * URLを正規化
+     * @param {string} requestUrl リクエストURL
+     * @param {Object} headers リクエストヘッダー
+     * @returns {string} 正規化されたURL
+     */
+    normalizeUrl(requestUrl, headers = {}) {
+        try {
+            let url;
+            if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://')) {
+                url = new URL(requestUrl);
+            } else {
+                const host = headers.host || 'localhost';
+                url = new URL(requestUrl.startsWith('/') ? `http://${host}${requestUrl}` : `http://${host}/${requestUrl}`);
+            }
+            // クエリパラメータも含めて正規化URLを生成
+            const normalized = `${url.protocol}//${url.host}${url.pathname}${url.search}`;
+            return normalized;
+        } catch (err) {
+            logger.error('URLの正規化エラー:', err, requestUrl);
+            throw err;
+        }
+    }
+    
+    /**
+     * キャッシュファイル名を生成
+     * @param {string} requestUrl リクエストURL
+     * @param {Object} headers リクエストヘッダー
+     * @returns {string} キャッシュファイルパス
+     */
+    getCacheFileName(requestUrl, headers = {}) {
+        const normalizedUrl = this.normalizeUrl(requestUrl, headers);
+        const hash = crypto.createHash('md5').update(normalizedUrl).digest('hex');
+        const url = new URL(requestUrl);
+        const filePath = url.pathname;
+        
+        const filenameWithExt = path.basename(filePath) || 'index.html';
+        const filenameWithoutExt = path.parse(filenameWithExt).name;
+        const extname = path.extname(filenameWithExt);
+        const filename = `${filenameWithoutExt}-${hash}${extname}`;
+        const dirPath = path.dirname(filePath);
+        
+        return path.join(this.CACHE_DIR, url.host, dirPath, `${filename}`);
+    }
+    
+    /**
+     * キャッシュをロード
+     * @param {string} cacheFile キャッシュファイルのパス
+     * @returns {Promise<Object|null>} キャッシュデータまたはnull
+     */
+    async loadCache(cacheFile) {
+        try {
+            const data = await fs.promises.readFile(`${cacheFile}.cache`, 'utf8');
+            const cache = JSON.parse(data);
+            if(cache.href){
+                const cacheDir = path.dirname(cacheFile);
+                const filename = path.join(cacheDir, cache.href);
+                const body = await fs.promises.readFile(filename);
+                cache.data = body.toString('base64');
+            }
+
+            logger.debug('キャッシュをロードしました:', cache.url);
+            return cache;
+        } catch (err) {
+            logger.error('キャッシュの読み込みエラー:', err);
+            
+            // キャッシュファイルが破損している場合は削除する
+            try {
+                logger.error(`破損したキャッシュファイルを削除: ${cacheFile}`);
+                await fs.promises.unlink(cacheFile);
+                await fs.promises.unlink(`${cacheFile}.cache`);
+            } catch (unlinkErr) {
+                logger.error('キャッシュファイル削除エラー:', unlinkErr);
+            }
+            
+            return null;
+        }
+    }
+    
+    /**
+     * キャッシュを保存
+     * @param {string} cacheFile キャッシュファイルパス
+     * @param {Object} cacheHeader キャッシュヘッダー情報
+     * @param {Buffer} body レスポンスボディ
+     */
+    async saveCache(cacheFile, cacheHeader, body) {
+        try {
+            const cacheDir = path.dirname(cacheFile);
+            const filename = path.basename(cacheFile);
+            await fs.promises.mkdir(cacheDir, { recursive: true });
+            await fs.promises.chmod(cacheDir, 0o777);
+            cacheHeader.href=filename;
+            await fs.promises.writeFile(`${cacheFile}.cache`, JSON.stringify(cacheHeader, null, 2));
+            await fs.promises.writeFile(cacheFile, body);
+            await fs.promises.chmod(`${cacheFile}.cache`, 0o666);
+            await fs.promises.chmod(cacheFile, 0o666);
+
+            logger.debug('キャッシュを保存しました:', cacheHeader.url, `${cacheFile}.cache`,`${cacheFile}`);
+        } catch (err) {
+            logger.error('キャッシュの保存エラー:', err);
+        }
+    }
+    
+    /**
+     * ファイルが存在するか確認
+     * @param {string} filePath ファイルパス
+     * @returns {Promise<boolean>} 存在すればtrue
+     */
+    async fileExists(filePath) {
+        try {
+            await fs.promises.access(filePath);
+            return true;
+        } catch (err) {
+            return false;
+        }
+    }
+    
+    /**
+     * キャッシュファイルの整合性をチェックして修復
+     * @param {string} cacheFile キャッシュファイルパス
+     * @returns {Promise<boolean>} 正常なら true
+     */
+    async checkAndRepairCacheFile(cacheFile) {
+        try {
+            // ファイルが存在するか確認
+            const exists = await this.fileExists(cacheFile);
+            if (!exists) {
+                return false;
+            }
+            
+            // ファイルを読み込んでJSONとして解析
+            const data = await fs.promises.readFile(cacheFile, 'utf8');
+            try {
+                const cache = JSON.parse(data);
+                
+                // 必要なプロパティがすべて存在するか確認
+                if (!cache.url || !cache.statusCode || !cache.headers || !cache.data) {
+                    logger.warn(`キャッシュファイル形式不正: ${cacheFile} - 削除します`);
+                    await fs.promises.unlink(cacheFile);
+                    return false;
+                }
+                
+                // Base64データをデコードしてみる
+                try {
+                    const decodedData = Buffer.from(cache.data, 'base64');
+                    if (decodedData.length === 0 && cache.data.length > 0) {
+                        // Base64デコードに失敗した可能性が高い
+                        logger.warn(`キャッシュデータのBase64デコードに失敗: ${cacheFile} - 削除します`);
+                        await fs.promises.unlink(cacheFile);
+                        return false;
+                    }
+                } catch (decodeErr) {
+                    logger.warn(`キャッシュデータのBase64デコードエラー: ${cacheFile} - 削除します`, decodeErr);
+                    await fs.promises.unlink(cacheFile);
+                    return false;
+                }
+                
+                return true;
+            } catch (jsonErr) {
+                // JSON解析エラー - ファイルが破損している
+                logger.warn(`キャッシュファイルのJSON解析エラー: ${cacheFile} - 削除します`);
+                await fs.promises.unlink(cacheFile);
+                return false;
+            }
+        } catch (err) {
+            logger.error(`キャッシュファイルチェックエラー: ${cacheFile}`, err);
+            
+            // エラー発生時もファイル削除を試行
+            try {
+                await fs.promises.unlink(cacheFile);
+                logger.warn(`エラーが発生したキャッシュファイルを削除: ${cacheFile}`);
+            } catch (unlinkErr) {
+                // 削除エラーは無視
+            }
+            
+            return false;
+        }
+    }
+    
+    /**
+     * 破損したキャッシュファイルをクリーンアップ
+     */
+    async cleanupCorruptedCacheFiles() {
+        try {
+            // キャッシュディレクトリ内のファイル一覧を取得
+            const files = await fs.promises.readdir(this.CACHE_DIR);
+            
+            let checkedCount = 0;
+            let removedCount = 0;
+            
+            // ファイル数が多い場合は一部だけチェック
+            const filesToCheck = files.length > 100 ? 
+                files.sort(() => Math.random() - 0.5).slice(0, 100) : // ランダムに100ファイルを選択
+                files;
+            
+            for (const file of filesToCheck) {
+                if (!file.endsWith('.cache')) continue;
+                
+                checkedCount++;
+                const cacheFile = path.join(this.CACHE_DIR, file);
+                
+                const isValid = await this.checkAndRepairCacheFile(cacheFile);
+                if (!isValid) {
+                    removedCount++;
+                }
+            }
+            
+            if (removedCount > 0) {
+                logger.info(`キャッシュ整合性チェック完了: ${checkedCount}ファイルをチェック、${removedCount}ファイルを削除`);
+            }
+        } catch (err) {
+            logger.error('キャッシュクリーンアップエラー:', err);
+        }
+    }
+    
+    /**
+     * キャッシュディレクトリ内のすべてのファイルをクリア
+     */
+    async clearAllCache() {
+        try {
+            const files = await fs.promises.readdir(this.CACHE_DIR);
+            let deletedCount = 0;
+            const errors = [];
+            
+            for (const file of files) {
+                try {
+                    await fs.promises.unlink(path.join(this.CACHE_DIR, file));
+                    deletedCount++;
+                } catch (unlinkErr) {
+                    errors.push(`${file}: ${unlinkErr.message}`);
+                }
+            }
+            
+            logger.info(`キャッシュクリア: ${deletedCount}ファイルを削除しました。エラー: ${errors.length}件`);
+            return { deletedCount, errors };
+        } catch (err) {
+            logger.error('キャッシュクリアエラー:', err);
+            throw err;
+        }
+    }
+}
 
 // 設定ファイルの読み込み
 const CONFIG_PATH = path.join(__dirname, '..', 'config', 'proxy-config.json');
@@ -97,69 +442,17 @@ try {
     process.exit(1);
 }
 
-// ホワイトリストドメインの設定
-// 通常のドメインはSetに、正規表現パターンは別の配列に格納
-const whitelistedDomains = new Set();
-const whitelistedRegexPatterns = [];
+// ホワイトリストの設定とキャッシュマネージャーの初期化
+const whitelistManager = new WhitelistManager();
+whitelistManager.loadFromConfig(config);
 
-// ホワイトリスト設定を処理
-if (Array.isArray(config.whitelistedDomains)) {
-    config.whitelistedDomains.forEach(domain => {
-        if (domain.startsWith('regex:')) {
-            // 正規表現パターンの場合
-            const pattern = domain.substring(6); // 'regex:' を除去
-            try {
-                const regex = new RegExp(pattern, 'i'); // 大文字小文字を区別しない
-                whitelistedRegexPatterns.push(regex);
-                logger.log(`正規表現パターンをホワイトリストに追加: ${pattern}`);
-            } catch (err) {
-                logger.error(`無効な正規表現パターン: ${pattern}`, err);
-            }
-        } else {
-            // 通常のドメイン名の場合
-            whitelistedDomains.add(domain);
-            logger.log(`ドメインをホワイトリストに追加: ${domain}`);
-        }
-    });
-}
-
-// キャッシュディレクトリのパス
+// キャッシュディレクトリのパスを設定
 const CACHE_DIR = path.join(__dirname, '..', 'cache');
+const cacheManager = new CacheManager(CACHE_DIR);
 
-// URLの正規化処理 - クエリパラメータも含めて保持するように修正
-const normalizeUrl = (requestUrl, headers = {}) => {
-    try {
-        let url;
-        if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://')) {
-            url = new URL(requestUrl);
-        } else {
-            const host = headers.host || 'localhost';
-            url = new URL(requestUrl.startsWith('/') ? `http://${host}${requestUrl}` : `http://${host}/${requestUrl}`);
-        }
-        // クエリパラメータも含めて正規化URLを生成
-        const normalized = `${url.protocol}//${url.host}${url.pathname}${url.search}`;
-        return normalized;
-    } catch (err) {
-        logger.error('URLの正規化エラー:', err, requestUrl);
-        throw err;
-    }
-};
-
-// キャッシュファイル名の生成
-const getCacheFileName = (requestUrl, headers = {}) => {
-    const normalizedUrl = normalizeUrl(requestUrl, headers);
-    const hash = crypto.createHash('md5').update(normalizedUrl).digest('hex');
-    const url = new URL(requestUrl);
-    const filePath = url.pathname;
-    
-    const filenameWithExt = path.basename(filePath) || 'index.html';
-    const filenameWithoutExt = path.parse(filenameWithExt).name;
-    const extname = path.extname(filenameWithExt);
-    const filename = `${filenameWithoutExt}-${hash}${extname}`;
-    const dirPath = path.dirname(filePath);
-    //return path.join(CACHE_DIR, url.host, dirPath, `${hash}.cache`);
-    return path.join(CACHE_DIR, url.host, dirPath, `${filename}`);
-};
+// ホワイトリストドメインの設定からクラスを作成
+const whitelistedDomains = whitelistManager.domains;
+const whitelistedRegexPatterns = whitelistManager.regexPatterns;
 
 // キャッシュディレクトリの初期化
 const initializeCacheDir = async () => {
@@ -324,7 +617,7 @@ const handleProxyRequest = async (clientReq, clientRes, options, isWhitelisted, 
                     
                     // キャッシュ保存カウンターを更新
                     if (isHttps) {
-                        httpsStats.cacheSaves++;
+                        statsCollector.incrementHttpsStat('cacheSaves');
                     }
 
                     // ファイルの存在確認
@@ -522,7 +815,7 @@ function setupHttpsResponseCapture(targetSocket, clientSocket, normalizedUrl) {
                 try {
                     await saveCache(cacheFile, cacheHeader, bodyBuffer);
                     logger.debug(`HTTPSレスポンスをキャッシュしました: ${normalizedUrl}, サイズ=${bodyBuffer.length}バイト`);
-                    httpsStats.cacheSaves++;
+                    statsCollector.incrementHttpsStat('cacheSaves');
                 } catch (cacheErr) {
                     logger.error('HTTPSキャッシュ保存エラー:', cacheErr);
                 }
@@ -576,7 +869,7 @@ const handleHttpsCache = async (clientSocket, targetSocket, requestInfo) => {
                 const cache = await loadCache(cacheFile);
                 if (cache && cache.data) {
                     logger.info(`HTTPSキャッシュヒット: ${normalizedUrl}`);
-                    httpsStats.cacheHits++;
+                    statsCollector.incrementHttpsStat('cacheHits');
                     
                     try {
                         // キャッシュからレスポンスを構築
@@ -623,7 +916,7 @@ const handleHttpsCache = async (clientSocket, targetSocket, requestInfo) => {
                 }
             } else {
                 logger.debug(`HTTPSキャッシュミス: ${normalizedUrl}`);
-                httpsStats.cacheMisses++;
+                statsCollector.incrementHttpsStat('cacheMisses');
             }
         } catch (err) {
             logger.error('HTTPSキャッシュチェックエラー:', err);
@@ -648,20 +941,138 @@ const handleHttpsCache = async (clientSocket, targetSocket, requestInfo) => {
     return false;
 };
 
-// 統計情報の追跡
-const stats = {
-    httpRequests: 0,
-    httpsRequests: 0,
-    cacheHits: 0,
-    cacheMisses: 0
-};
+// 統計情報収集クラス
+class StatisticsCollector {
+    constructor() {
+        this.http = {
+            requests: 0,
+            cacheHits: 0,
+            cacheMisses: 0
+        };
+        
+        this.https = {
+            connections: 0,
+            requests: 0,
+            cacheHits: 0,
+            cacheMisses: 0,
+            cacheSaves: 0
+        };
+        
+        this.activeConnections = new Set();
+    }
+    
+    /**
+     * アクティブな接続を追跡
+     * @param {net.Socket} socket ソケットオブジェクト
+     * @returns {net.Socket} 同じソケットオブジェクト
+     */
+    trackConnection(socket) {
+        this.activeConnections.add(socket);
+        
+        // 接続が閉じられたときにセットから削除
+        socket.once('close', () => {
+            this.activeConnections.delete(socket);
+            logger.info(`アクティブ接続が削除されました。残り: ${this.activeConnections.size}`);
+        });
+        
+        return socket;
+    }
+    
+    /**
+     * HTTP統計情報の更新
+     * @param {string} type 統計タイプ (requests|cacheHits|cacheMisses)
+     * @param {number} value 増加量 (デフォルト: 1)
+     */
+    incrementHttpStat(type, value = 1) {
+        if (this.http.hasOwnProperty(type)) {
+            this.http[type] += value;
+        }
+    }
+    
+    /**
+     * HTTPS統計情報の更新
+     * @param {string} type 統計タイプ (connections|requests|cacheHits|cacheMisses|cacheSaves)
+     * @param {number} value 増加量 (デフォルト: 1)
+     */
+    incrementHttpsStat(type, value = 1) {
+        if (this.https.hasOwnProperty(type)) {
+            this.https[type] += value;
+        }
+    }
+    
+    /**
+     * 統計情報を取得
+     * @returns {Object} 統計情報
+     */
+    getStats() {
+        return {
+            http: { ...this.http },
+            https: { ...this.https },
+            activeConnections: this.activeConnections.size,
+            timestamp: new Date().toISOString(),
+            uptime: process.uptime(),
+            memoryUsage: process.memoryUsage()
+        };
+    }
+    
+    /**
+     * 統計情報をログに出力
+     */
+    logStats() {
+        logger.info('==== キャッシュ利用状況 ====');
+        logger.info(`HTTP キャッシュヒット: ${this.http.cacheHits}, ミス: ${this.http.cacheMisses}`);
+        logger.info(`HTTPS キャッシュヒット: ${this.https.cacheHits}, ミス: ${this.https.cacheMisses}, 保存: ${this.https.cacheSaves}`);
+        logger.info(`アクティブ接続数: ${this.activeConnections.size}`);
+        
+        logger.info('==== プロキシ統計情報 ====');
+        logger.info(`HTTP: ${this.http.requests}件, HTTPS: ${this.https.requests}件`);
+        logger.info(`キャッシュヒット: ${this.http.cacheHits + this.https.cacheHits}, ミス: ${this.http.cacheMisses + this.https.cacheMisses}, 保存: ${this.https.cacheSaves}`);
+    }
+    
+    /**
+     * キャッシュファイル数をログに出力
+     * @param {string} cacheDir キャッシュディレクトリパス
+     */
+    async logCacheFileCount(cacheDir) {
+        try {
+            const files = await fs.promises.readdir(cacheDir);
+            logger.info(`キャッシュファイル数: ${files.length}`);
+        } catch (err) {
+            logger.error('キャッシュディレクトリ読み取りエラー:', err);
+        }
+    }
+    
+    /**
+     * 定期的なログ出力を開始
+     * @param {string} cacheDir キャッシュディレクトリパス
+     */
+    startPeriodicLogging(cacheDir) {
+        // キャッシュ統計情報の定期出力（30秒ごと）
+        setInterval(() => {
+            this.logStats();
+            this.logCacheFileCount(cacheDir);
+        }, 30000);
+    }
+}
 
-const httpsStats = {
-    connections: 0,
-    cacheHits: 0,
-    cacheMisses: 0,
-    cacheSaves: 0  // 新たに追加: キャッシュ保存回数
-};
+// 既存のstats変数とhttpsStats変数を置き換える
+const statsCollector = new StatisticsCollector();
+
+// 定期的な統計情報のログ出力を開始（既存の同様のコードは削除すること）
+statsCollector.startPeriodicLogging(CACHE_DIR);
+
+// 既存のtrackConnection関数を置き換える
+// 新しい接続が確立されたときにセットに追加
+function trackConnection(socket) {
+    return statsCollector.trackConnection(socket);
+}
+
+// 下記の既存の変数と関連コードは削除すること（コメントアウトしておく）
+// const stats = { ... }
+// const httpsStats = { ... }
+// const activeConnections = new Set();
+// setInterval(() => { ... }, 30000); // 30秒ごとの統計出力
+// setInterval(() => { ... }, 60000); // 1分ごとのプロキシ統計出力
 
 // ホワイトリストの確認用ヘルパー関数 (正規表現対応版)
 const isHostWhitelisted = (host) => {
@@ -691,7 +1102,7 @@ function simpleProxyTunnel(clientSocket, targetSocket, head) {
     logger.log('シンプルな直接トンネルモードを使用しますが、HTTPSデータを解析してキャッシュします');
     
     // HTTPSリクエストのカウントを増やす
-    httpsStats.connections++;
+    statsCollector.incrementHttpsStat('connections');
     
     // 効率的なデータ転送のための設定
     clientSocket.setTimeout(0);
@@ -944,7 +1355,7 @@ async function directHttpsRequest(url) {
                     const cache = await loadCache(cacheFile);
                     if (cache && cache.data) {
                         logger.info(`キャッシュヒット: ${url}`);
-                        httpsStats.cacheHits++;
+                        statsCollector.incrementHttpsStat('cacheHits');
                         return resolve({
                             fromCache: true,
                             data: Buffer.from(cache.data, 'base64'),
@@ -971,7 +1382,7 @@ async function directHttpsRequest(url) {
             }
             
             // キャッシュがない場合またはエラーが発生した場合は直接リクエスト
-            httpsStats.cacheMisses++;
+            statsCollector.incrementHttpsStat('cacheMisses');
             logger.debug(`キャッシュミス - 直接リクエスト: ${url}`);
             
             // HTTPSリクエストのオプション設定
@@ -1012,7 +1423,7 @@ async function directHttpsRequest(url) {
                                 // 非同期でキャッシュを保存
                                 try {
                                     await saveCache(cacheFile, cacheHeader, responseData);
-                                    httpsStats.cacheSaves++;
+                                    statsCollector.incrementHttpsStat('cacheSaves');
                                     logger.debug(`HTTPSレスポンスをキャッシュしました: ${url}`);
                                 } catch (err) {
                                     logger.error('キャッシュ保存エラー:', err);
@@ -1112,28 +1523,12 @@ async function handleSimplifiedHttpsRequest(req, res, targetHost) {
     }
 }
 
-// アクティブな接続を追跡するために使用するセット
-const activeConnections = new Set();
-
-// 新しい接続が確立されたときにセットに追加
-function trackConnection(socket) {
-    activeConnections.add(socket);
-    
-    // 接続が閉じられたときにセットから削除
-    socket.once('close', () => {
-        activeConnections.delete(socket);
-        logger.info(`アクティブ接続が削除されました。残り: ${activeConnections.size}`);
-    });
-    
-    return socket;
-}
-
 // プロキシサーバーの作成 - クエリパラメータへの対応を改善
 const server = http.createServer(async (clientReq, clientRes) => {
     logger.debug('リクエスト受信:', clientReq.method, clientReq.url);
     
     // HTTPリクエストをカウント
-    stats.httpRequests++;
+    statsCollector.incrementHttpStat('requests');
 
     const requestedHost = clientReq.headers.host;
     if (!requestedHost) {
@@ -1220,9 +1615,9 @@ const server = http.createServer(async (clientReq, clientRes) => {
                 const cache = await loadCache(cacheFile);
                 if (cache) {
                     logger.info('キャッシュヒット:', normalizedUrl);
-                    stats.cacheHits++; // キャッシュヒットをカウント
+                    statsCollector.incrementHttpStat('cacheHits'); // キャッシュヒットをカウント
                     if (isHttps) {
-                        httpsStats.cacheHits++;
+                        statsCollector.incrementHttpsStat('cacheHits');
                     }
                     
                     const headers = {
@@ -1259,9 +1654,9 @@ const server = http.createServer(async (clientReq, clientRes) => {
                         logger.error('キャッシュファイル削除エラー:', unlinkErr);
                     }
                 }
-                stats.cacheMisses++; // キャッシュミスをカウント
+                statsCollector.incrementHttpStat('cacheMisses'); // キャッシュミスをカウント
                 if (isHttps) {
-                    httpsStats.cacheMisses++;
+                    statsCollector.incrementHttpsStat('cacheMisses');
                 }
             }
         }
@@ -1306,7 +1701,7 @@ server.on('connect', (req, clientSocket, head) => {
     logger.info('CONNECT要求を受信:', req.url);
     
     // HTTPSリクエストをカウント
-    stats.httpsRequests++;
+    statsCollector.incrementHttpsStat('requests');
 
     const [targetHost, targetPort] = req.url.split(':');
     const targetPortNum = parseInt(targetPort, 10) || 443;
@@ -1361,7 +1756,7 @@ async function handleCachedRequest(host, path, clientSocket, targetSocket, origi
             const cache = await loadCache(cacheFile);
             if (cache && cache.data) {
                 logger.info(`キャッシュヒット: ${url}`);
-                httpsStats.cacheHits++;
+                statsCollector.incrementHttpsStat('cacheHits');
                 
                 // Base64デコード
                 const data = Buffer.from(cache.data, 'base64');
@@ -1387,7 +1782,7 @@ async function handleCachedRequest(host, path, clientSocket, targetSocket, origi
             }
         }
         logger.info(`キャッシュミス: ${url}`);
-        httpsStats.cacheMisses++;
+        statsCollector.incrementHttpsStat('cacheMisses');
         return false;
     } catch (err) {
         logger.error('キャッシュチェックエラー:', err);
@@ -1476,7 +1871,7 @@ function setupDataCapture(targetSocket, clientSocket, url) {
                 // キャッシュ保存
                 const cacheFile = getCacheFileName(url);
                 await saveCache(cacheFile, cacheHeader, responseData);
-                httpsStats.cacheSaves++;
+                statsCollector.incrementHttpsStat('cacheSaves');
                 
                 logger.info(`レスポンスをキャッシュしました: ${url}, サイズ=${responseData.length}バイト`);
             } catch (err) {
@@ -1537,7 +1932,7 @@ function handleDirectHttpsRequest(req, res) {
                     .then(cache => {
                         if (cache && cache.data) {
                             logger.info(`キャッシュヒット: ${req.url}`);
-                            stats.cacheHits++;
+                            statsCollector.incrementHttpStat('cacheHits');
                             
                             const headers = { ...cache.headers, 'X-Cache': 'HIT' };
                             const data = Buffer.from(cache.data, 'base64');
@@ -1568,7 +1963,7 @@ function handleDirectHttpsRequest(req, res) {
 // 直接HTTPSリクエストの送信
 function sendDirectRequest(clientReq, clientRes, url, cacheFile) {
     logger.info(`キャッシュミス - 直接リクエスト: ${url}`);
-    stats.cacheMisses++;
+    statsCollector.incrementHttpStat('cacheMisses');
     
     const options = {
         headers: { ...clientReq.headers },
@@ -1617,7 +2012,7 @@ function sendDirectRequest(clientReq, clientRes, url, cacheFile) {
                     };
                     
                     await saveCache(cacheFile, cacheHeader, responseData);
-                    httpsStats.cacheSaves++;
+                    statsCollector.incrementHttpsStat('cacheSaves');
                     
                     logger.info(`HTTPSレスポンスをキャッシュしました: ${url}, サイズ=${responseData.length}バイト`);
                 } catch (err) {
@@ -1672,40 +2067,6 @@ server.on('request', (req, res) => {
     // ...existing code...
 });
 
-// 定期的にキャッシュ統計情報を出力（より短く設定）
-setInterval(() => {
-    logger.info('==== キャッシュ利用状況 ====');
-    logger.info(`HTTP キャッシュヒット: ${stats.cacheHits}, ミス: ${stats.cacheMisses}`);
-    logger.info(`HTTPS キャッシュヒット: ${httpsStats.cacheHits}, ミス: ${httpsStats.cacheMisses}, 保存: ${httpsStats.cacheSaves}`);
-    logger.info(`アクティブ接続数: ${activeConnections.size}`);
-}, 30000); // 30秒ごとに出力に変更
-
-// ファイルが存在するかチェックするヘルパー関数
-async function fileExists(filePath) {
-    try {
-        await fs.promises.access(filePath);
-        return true;
-    } catch (err) {
-        return false;
-    }
-}
-
-// 定期的にステータスを出力
-setInterval(() => {
-    logger.info('==== プロキシ統計情報 ====');
-    logger.info(`HTTP: ${stats.httpRequests}件, HTTPS: ${stats.httpsRequests}件`);
-    logger.info(`キャッシュヒット: ${stats.cacheHits + httpsStats.cacheHits}, ミス: ${stats.cacheMisses + httpsStats.cacheMisses}, 保存: ${httpsStats.cacheSaves}`);
-    
-    // よりコンパクトにキャッシュ情報を取得
-    fs.readdir(CACHE_DIR, (err, files) => {
-        if (err) {
-            logger.error('キャッシュディレクトリ読み取りエラー:', err);
-            return;
-        }
-        logger.info(`キャッシュファイル数: ${files.length}`);
-    });
-}, 60000); // 1分ごとに出力に変更
-
 // 引数からポートを取得するよう修正
 
 // コマンドライン引数からポートを取得
@@ -1755,12 +2116,12 @@ const cleanup = () => {
     });
     
     // アクティブな接続数をログに記録
-    logger.log(`アクティブな接続数: ${activeConnections.size}`);
+    logger.log(`アクティブな接続数: ${statsCollector.activeConnections.size}`);
     
     // すべてのアクティブな接続を終了
-    if (activeConnections.size > 0) {
+    if (statsCollector.activeConnections.size > 0) {
         logger.log('すべてのアクティブな接続を終了しています...');
-        activeConnections.forEach(socket => {
+        statsCollector.activeConnections.forEach(socket => {
             try {
                 // コネクション終了シグナルを送信
                 if (!socket.destroyed) {
@@ -1793,15 +2154,15 @@ const cleanup = () => {
 
     // 定期的にアクティブ接続をチェック
     const intervalCheck = setInterval(() => {
-        if (activeConnections.size === 0) {
+        if (statsCollector.activeConnections.size === 0) {
             clearInterval(intervalCheck);
             clearTimeout(forcedExitTimeout);
             logger.log(`正常終了: すべての接続が閉じられました (${Date.now() - shutdownStart}ms)`);
             process.exit(0);
         } else {
-            logger.log(`まだ ${activeConnections.size} 個の接続が残っています...`);
+            logger.log(`まだ ${statsCollector.activeConnections.size} 個の接続が残っています...`);
             // 残存接続を強制終了
-            activeConnections.forEach(socket => {
+            statsCollector.activeConnections.forEach(socket => {
                 try {
                     if (!socket.destroyed) {
                         socket.destroy();
@@ -1821,21 +2182,17 @@ server.listen(PORT, () => {
     logger.log(`プロキシサーバーが起動しました - ポート ${PORT}`);
 });
 
-// 統計とヘルスチェック用のエンドポイントを追加
+// 統計とヘルスチェック用のエンドポイントを更新
 server.on('request', (req, res) => {
     // 統計情報のAPIエンドポイント
     if (req.url === '/proxy-stats' && req.headers.host.includes('localhost')) {
         res.writeHead(200, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify({
-            stats,
-            httpsStats,
+        const statsData = {
+            ...statsCollector.getStats(),
             whitelistedDomains: Array.from(whitelistedDomains),
             whitelistedRegexPatterns: whitelistedRegexPatterns.map(r => r.toString()),
-            activeConnections: activeConnections.size,
-            uptime: process.uptime(),
-            memoryUsage: process.memoryUsage(),
-            timestamp: new Date().toISOString()
-        }, null, 2));
+        };
+        res.end(JSON.stringify(statsData, null, 2));
         return;
     }
     
@@ -1919,10 +2276,11 @@ server.on('request', (req, res) => {
     }
 });
 
-// メインの説明ページを追加（デバッグ用）
+// メインの説明ページのHTMLを更新
 server.on('request', (req, res) => {
     if (req.url === '/' && req.headers.host.includes('localhost')) {
         res.writeHead(200, {'Content-Type': 'text/html'});
+        const stats = statsCollector.getStats();
         res.end(`
             <html>
             <head>
@@ -1945,20 +2303,26 @@ server.on('request', (req, res) => {
                     <div class="stats">
                         <div class="stat-box">
                             <h3>HTTP</h3>
-                            <p>リクエスト: ${stats.httpRequests}</p>
-                            <p>キャッシュヒット: ${stats.cacheHits}</p>
-                            <p>キャッシュミス: ${stats.cacheMisses}</p>
+                            <p>リクエスト: ${stats.http.requests}</p>
+                            <p>キャッシュヒット: ${stats.http.cacheHits}</p>
+                            <p>キャッシュミス: ${stats.http.cacheMisses}</p>
                         </div>
                         <div class="stat-box">
                             <h3>HTTPS</h3>
-                            <p>リクエスト: ${stats.httpsRequests}</p>
-                            <p>キャッシュヒット: ${httpsStats.cacheHits}</p>
-                            <p>キャッシュミス: ${httpsStats.cacheMisses}</p>
-                            <p>キャッシュ保存: ${httpsStats.cacheSaves}</p>
+                            <p>リクエスト: ${stats.https.requests}</p>
+                            <p>キャッシュヒット: ${stats.https.cacheHits}</p>
+                            <p>キャッシュミス: ${stats.https.cacheMisses}</p>
+                            <p>キャッシュ保存: ${stats.https.cacheSaves}</p>
+                        </div>
+                        <div class="stat-box">
+                            <h3>接続情報</h3>
+                            <p>アクティブ接続: ${stats.activeConnections}</p>
+                            <p>稼働時間: ${Math.floor(stats.uptime / 60)} 分</p>
                         </div>
                     </div>
                 </div>
                 
+                <!-- 他のHTMLコンテンツはそのまま -->
                 <div class="card">
                     <h2>キャッシュテスト</h2>
                     <div>
@@ -1997,6 +2361,7 @@ server.on('request', (req, res) => {
                 </div>
                 
                 <script>
+                    // JavaScriptコード部分はそのまま
                     async function checkCache() {
                         const url = document.getElementById('testUrl').value;
                         const result = document.getElementById('result');
@@ -2128,7 +2493,7 @@ function createTlsRelayServer(clientSocket, targetHost, targetPort) {
                                         const cache = await loadCache(cacheFile);
                                         if (cache && cache.data) {
                                             logger.info(`キャッシュヒット: ${fullUrl}`);
-                                            httpsStats.cacheHits++;
+                                            statsCollector.incrementHttpsStat('cacheHits');
                                             
                                             // キャッシュからのレスポンスを構築
                                             const responseData = Buffer.from(cache.data, 'base64');
@@ -2238,7 +2603,7 @@ function createTlsRelayServer(clientSocket, targetHost, targetPort) {
                                             // キャッシュを保存
                                             const cacheFile = getCacheFileName(fullUrl);
                                             await saveCache(cacheFile, cacheHeader, responseData);
-                                            httpsStats.cacheSaves++;
+                                            statsCollector.incrementHttpsStat('cacheSaves');
                                             
                                             logger.info(`HTTPSレスポンスをキャッシュしました: ${fullUrl}, サイズ=${responseData.length}バイト`);
                                         } catch (err) {
@@ -2384,7 +2749,7 @@ function createSimpleTunnel(clientSocket, targetHost, targetPort, head) {
                         'Proxy-Agent: Node-Proxy/1.0\r\n\r\n');
         
         // HTTPSリクエストのカウントを増やす
-        httpsStats.connections++;
+        statsCollector.incrementHttpsStat('connections');
         
         // 効率的なデータ転送のための設定
         clientSocket.setTimeout(0);
@@ -2482,13 +2847,13 @@ function createSimpleTunnel(clientSocket, targetHost, targetPort, head) {
                                             const cache = await loadCache(cacheFile);
                                             if (cache && cache.data) {
                                                 logger.log(`HTTPSキャッシュヒット: ${cacheUrl}`);
-                                                httpsStats.cacheHits++;
+                                                statsCollector.incrementHttpsStat('cacheHits');
                                                 // ここではキャッシュを提供しない
                                                 // (すでにターゲットにリクエストが送信されている)
                                             }
                                         } else {
                                             logger.log(`HTTPSキャッシュミス: ${cacheUrl}`);
-                                            httpsStats.cacheMisses++;
+                                            statsCollector.incrementHttpsStat('cacheMisses');
                                             
                                             // レスポンスをキャプチャするリスナーを設置
                                             setupResponseCapture(targetSocket, clientSocket, cacheUrl);
@@ -2621,7 +2986,7 @@ function createSimpleTunnel(clientSocket, targetHost, targetPort, head) {
                         
                         // キャッシュを保存
                         await saveCache(cacheFile, cacheHeader, bodyData);
-                        httpsStats.cacheSaves++;
+                        statsCollector.incrementHttpsStat('cacheSaves');
                         logger.log(`HTTPSレスポンスをキャッシュしました: ${url}, サイズ=${bodyData.length}バイト`);
                     } catch (err) {
                         logger.error('キャッシュ保存エラー:', err);
@@ -2740,7 +3105,7 @@ async function directHttpsRequest(url) {
                     const cache = await loadCache(cacheFile);
                     if (cache && cache.data) {
                         logger.info(`キャッシュヒット: ${url}`);
-                        httpsStats.cacheHits++;
+                        statsCollector.incrementHttpsStat('cacheHits');
                         return resolve({
                             fromCache: true,
                             data: Buffer.from(cache.data, 'base64'),
@@ -2755,7 +3120,7 @@ async function directHttpsRequest(url) {
             }
             
             // キャッシュがない場合またはエラーが発生した場合は直接リクエスト
-            httpsStats.cacheMisses++;
+            statsCollector.incrementHttpsStat('cacheMisses');
             logger.debug(`キャッシュミス - 直接リクエスト: ${url}`);
             
             // HTTPSリクエストのオプション設定
@@ -2796,7 +3161,7 @@ async function directHttpsRequest(url) {
                                 // 非同期でキャッシュを保存
                                 try {
                                     await saveCache(cacheFile, cacheHeader, responseData);
-                                    httpsStats.cacheSaves++;
+                                    statsCollector.incrementHttpsStat('cacheSaves');
                                     logger.debug(`HTTPSレスポンスをキャッシュしました: ${url}`);
                                 } catch (err) {
                                     logger.error('キャッシュ保存エラー:', err);
@@ -2915,7 +3280,7 @@ function handleHTTPSProxy(clientSocket, targetHost, targetPort, head) {
                                     const cache = await loadCache(cacheFile);
                                     if (cache && cache.data) {
                                         logger.info(`キャッシュヒット: ${fullUrl}`);
-                                        httpsStats.cacheHits++;
+                                        statsCollector.incrementHttpsStat('cacheHits');
                                         
                                         // キャッシュからレスポンスを構築
                                         const responseData = Buffer.from(cache.data, 'base64');
@@ -2963,7 +3328,7 @@ function handleHTTPSProxy(clientSocket, targetHost, targetPort, head) {
                                 
                                 // キャッシュが無い場合は直接リクエスト
                                 logger.debug(`キャッシュミス: ${fullUrl}`);
-                                httpsStats.cacheMisses++;
+                                statsCollector.incrementHttpsStat('cacheMisses');
                                 
                                 // HTTPSリクエスト作成
                                 const options = {
@@ -3034,7 +3399,7 @@ function handleHTTPSProxy(clientSocket, targetHost, targetPort, head) {
                                             // 非同期でキャッシュ保存
                                             try {
                                                 await saveCache(cacheFile, cacheHeader, responseData);
-                                                httpsStats.cacheSaves++;
+                                                statsCollector.incrementHttpsStat('cacheSaves');
                                                 logger.debug(`HTTPSレスポンスをキャッシュしました: ${fullUrl}`);
                                             } catch (err) {
                                                 logger.error('キャッシュ保存エラー:', err);
@@ -3597,4 +3962,370 @@ async function cleanupCorruptedCacheFiles() {
 setTimeout(cleanupCorruptedCacheFiles, 10000); // 起動から10秒後に初回実行
 setInterval(cleanupCorruptedCacheFiles, 1800000); // その後30分ごとに実行
 
-// ...existing code...
+// URLからキャッシュファイル名を生成する関数をローカルではなく、グローバルにする
+const getCacheFileName = (requestUrl, headers = {}) => {
+    try {
+        let url;
+        if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://')) {
+            url = new URL(requestUrl);
+        } else {
+            const host = headers.host || 'localhost';
+            url = new URL(requestUrl.startsWith('/') ? `http://${host}${requestUrl}` : `http://${host}/${requestUrl}`);
+        }
+        // クエリパラメータも含めて正規化URLを生成
+        const normalizedUrl = `${url.protocol}//${url.host}${url.pathname}${url.search}`;
+        const hash = crypto.createHash('md5').update(normalizedUrl).digest('hex');
+        const filePath = url.pathname;
+        
+        const filenameWithExt = path.basename(filePath) || 'index.html';
+        const filenameWithoutExt = path.parse(filenameWithExt).name;
+        const extname = path.extname(filenameWithExt);
+        const filename = `${filenameWithoutExt}-${hash}${extname}`;
+        const dirPath = path.dirname(filePath);
+        
+        return path.join(CACHE_DIR, url.host, dirPath, `${filename}`);
+    } catch (err) {
+        logger.error('URLの正規化エラー:', err, requestUrl);
+        throw err;
+    }
+};
+
+// ファイルが存在するか確認するヘルパー関数
+const fileExists = async (filePath) => {
+    try {
+        await fs.promises.access(filePath);
+        return true;
+    } catch (err) {
+        return false;
+    }
+};
+
+// 統計とヘルスチェック用のエンドポイントを更新
+server.on('request', (req, res) => {
+    // 統計情報のAPIエンドポイント
+    if (req.url === '/proxy-stats' && req.headers.host.includes('localhost')) {
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        const statsData = {
+            ...statsCollector.getStats(),
+            whitelistedDomains: Array.from(whitelistedDomains),
+            whitelistedRegexPatterns: whitelistedRegexPatterns.map(r => r.toString()),
+        };
+        res.end(JSON.stringify(statsData, null, 2));
+        return;
+    }
+    
+    // ヘルスチェックAPI
+    if (req.url === '/health' && req.headers.host.includes('localhost')) {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end('OK');
+        return;
+    }
+});
+
+// ホワイトリスト確認API（デバッグ用）
+server.on('request', (req, res) => {
+    // ホワイトリスト確認
+    if (req.url === '/check-whitelist' && req.headers.host.includes('localhost')) {
+        const host = req.headers['x-check-host'];
+        if (host) {
+            const isWhitelisted = isHostWhitelisted(host);
+            
+            // どのルールでマッチしたか確認
+            let matchedBy = 'none';
+            if (whitelistedDomains.has(host)) {
+                matchedBy = 'exact';
+            } else {
+                for (const regex of whitelistedRegexPatterns) {
+                    if (regex.test(host)) {
+                        matchedBy = regex.toString();
+                        break;
+                    }
+                }
+            }
+            
+            res.writeHead(200, {'Content-Type': 'application/json'});
+            res.end(JSON.stringify({
+                host,
+                isWhitelisted,
+                matchedBy,
+                whitelistedDomains: Array.from(whitelistedDomains),
+                whitelistedRegexPatterns: whitelistedRegexPatterns.map(r => r.toString())
+            }));
+        } else {
+            res.writeHead(400, {'Content-Type': 'text/plain'});
+            res.end('X-Check-Host header is required');
+        }
+        return;
+    }
+
+    // キャッシュクリア
+    if (req.url === '/clear-cache' && req.headers.host.includes('localhost')) {
+        fs.readdir(CACHE_DIR, (err, files) => {
+            if (err) {
+                res.writeHead(500, {'Content-Type': 'text/plain'});
+                res.end(`キャッシュディレクトリ読み取りエラー: ${err.message}`);
+                return;
+            }
+            
+            let deleted = 0;
+            const errors = [];
+            
+            if (files.length === 0) {
+                res.writeHead(200, {'Content-Type': 'text/plain'});
+                res.end('キャッシュファイルはありません');
+                return;
+            }
+            
+            files.forEach(file => {
+                try {
+                    fs.unlinkSync(path.join(CACHE_DIR, file));
+                    deleted++;
+                } catch (unlinkErr) {
+                    errors.push(`${file}: ${unlinkErr.message}`);
+                }
+            });
+            
+            res.writeHead(200, {'Content-Type': 'text/plain'});
+            res.end(`${deleted}個のキャッシュファイルを削除しました。${errors.length > 0 ? `\nエラー: ${errors.join(', ')}` : ''}`);
+        });
+        return;
+    }
+
+    // キャッシュチェック
+    if (req.url.startsWith('/check-cache') && req.headers.host.includes('localhost')) {
+        const urlParam = new URL(`http://localhost${req.url}`).searchParams.get('url');
+        if (!urlParam) {
+            res.writeHead(400, {'Content-Type': 'text/plain'});
+            res.end('url parameter is required');
+            return;
+        }
+        
+        const cacheFile = getCacheFileName(urlParam);
+        fs.access(`${cacheFile}.cache`, fs.constants.F_OK, (err) => {
+            if (err) {
+                res.writeHead(200, {'Content-Type': 'application/json'});
+                res.end(JSON.stringify({
+                    cached: false,
+                    url: urlParam,
+                    message: 'Cache not found'
+                }));
+                return;
+            }
+            
+            loadCache(cacheFile)
+                .then(cache => {
+                    res.writeHead(200, {'Content-Type': 'application/json'});
+                    if (cache) {
+                        res.end(JSON.stringify({
+                            cached: true,
+                            url: urlParam,
+                            statusCode: cache.statusCode,
+                            contentType: cache.headers['content-type'],
+                            dataSize: cache.data ? Buffer.from(cache.data, 'base64').length : 'unknown'
+                        }));
+                    } else {
+                        res.end(JSON.stringify({
+                            cached: false,
+                            url: urlParam,
+                            message: 'Invalid cache data'
+                        }));
+                    }
+                })
+                .catch(error => {
+                    res.writeHead(500, {'Content-Type': 'application/json'});
+                    res.end(JSON.stringify({
+                        error: error.message,
+                        url: urlParam
+                    }));
+                });
+        });
+        return;
+    }
+    
+    // キャッシュ更新
+    if (req.url.startsWith('/update-cache') && req.headers.host.includes('localhost')) {
+        const urlParam = new URL(`http://localhost${req.url}`).searchParams.get('url');
+        if (!urlParam) {
+            res.writeHead(400, {'Content-Type': 'text/plain'});
+            res.end('url parameter is required');
+            return;
+        }
+        
+        directHttpsRequest(urlParam)
+            .then(response => {
+                res.writeHead(200, {'Content-Type': 'application/json'});
+                res.end(JSON.stringify({
+                    success: true,
+                    url: urlParam,
+                    statusCode: response.statusCode,
+                    contentType: response.headers['content-type'],
+                    dataSize: response.data.length,
+                    fromCache: response.fromCache
+                }));
+            })
+            .catch(error => {
+                res.writeHead(500, {'Content-Type': 'application/json'});
+                res.end(JSON.stringify({
+                    error: error.message,
+                    url: urlParam
+                }));
+            });
+        return;
+    }
+});
+
+// メインの説明ページのHTMLを更新
+server.on('request', (req, res) => {
+    // 別のrequestハンドラで既に処理された場合は何もしない
+    if (res.headersSent || res.writableEnded) {
+        return;
+    }
+
+    if (req.url === '/' && req.headers.host.includes('localhost')) {
+        res.writeHead(200, {'Content-Type': 'text/html'});
+        const stats = statsCollector.getStats();
+        res.end(`
+            <html>
+            <head>
+                <title>プロキシキャッシュサーバー</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; }
+                    h1 { color: #333; }
+                    .card { border: 1px solid #ddd; padding: 15px; margin-bottom: 15px; border-radius: 5px; }
+                    pre { background: #f5f5f5; padding: 10px; border-radius: 5px; }
+                    .stats { display: flex; gap: 20px; }
+                    .stat-box { flex: 1; background: #f0f0f0; padding: 10px; border-radius: 5px; }
+                    input[type="text"] { width: 80%; padding: 5px; }
+                    button { padding: 5px 10px; }
+                </style>
+            </head>
+            <body>
+                <h1>プロキシキャッシュサーバー</h1>
+                <div class="card">
+                    <h2>統計情報</h2>
+                    <div class="stats">
+                        <div class="stat-box">
+                            <h3>HTTP</h3>
+                            <p>リクエスト: ${stats.http.requests}</p>
+                            <p>キャッシュヒット: ${stats.http.cacheHits}</p>
+                            <p>キャッシュミス: ${stats.http.cacheMisses}</p>
+                        </div>
+                        <div class="stat-box">
+                            <h3>HTTPS</h3>
+                            <p>リクエスト: ${stats.https.requests}</p>
+                            <p>キャッシュヒット: ${stats.https.cacheHits}</p>
+                            <p>キャッシュミス: ${stats.https.cacheMisses}</p>
+                            <p>キャッシュ保存: ${stats.https.cacheSaves}</p>
+                        </div>
+                        <div class="stat-box">
+                            <h3>接続情報</h3>
+                            <p>アクティブ接続: ${stats.activeConnections}</p>
+                            <p>稼働時間: ${Math.floor(stats.uptime / 60)} 分</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 他のHTMLコンテンツはそのまま -->
+                <div class="card">
+                    <h2>キャッシュテスト</h2>
+                    <div>
+                        <input type="text" id="testUrl" placeholder="https://example.com/" value="https://example.com/">
+                        <button onclick="checkCache()">キャッシュ確認</button>
+                        <button onclick="updateCache()">キャッシュ更新</button>
+                    </div>
+                    <pre id="result">結果がここに表示されます</pre>
+                </div>
+                
+                <div class="card">
+                    <h2>ホワイトリスト</h2>
+                    <h3>完全一致ドメイン:</h3>
+                    <ul>
+                        ${Array.from(whitelistedDomains).map(domain => `<li>${domain}</li>`).join('')}
+                    </ul>
+                    <h3>正規表現パターン:</h3>
+                    <ul>
+                        ${whitelistedRegexPatterns.map(regex => `<li>${regex.toString()}</li>`).join('')}
+                    </ul>
+                </div>
+                
+                <div class="card">
+                    <h2>ホワイトリストチェック</h2>
+                    <div>
+                        <input type="text" id="checkHost" placeholder="example.com" value="">
+                        <button onclick="checkWhitelist()">ホワイトリスト確認</button>
+                    </div>
+                    <pre id="whitelistResult">結果がここに表示されます</pre>
+                </div>
+                
+                <div class="card">
+                    <h2>管理</h2>
+                    <p><a href="/clear-cache">キャッシュをクリア</a></p>
+                    <p><a href="/proxy-stats">JSONで統計情報を表示</a></p>
+                    <p><a href="/health">ヘルスチェック</a></p>
+                </div>
+                
+                <script>
+                    // JavaScriptコード部分はそのまま
+                    async function checkCache() {
+                        const url = document.getElementById('testUrl').value;
+                        const result = document.getElementById('result');
+                        result.textContent = 'Loading...';
+                        
+                        try {
+                            const response = await fetch('/check-cache?url=' + encodeURIComponent(url));
+                            const data = await response.json();
+                            result.textContent = JSON.stringify(data, null, 2);
+                        } catch (err) {
+                            result.textContent = 'Error: ' + err.message;
+                        }
+                    }
+                    
+                    async function updateCache() {
+                        const url = document.getElementById('testUrl').value;
+                        const result = document.getElementById('result');
+                        result.textContent = 'Updating...';
+                        
+                        try {
+                            const response = await fetch('/update-cache?url=' + encodeURIComponent(url));
+                            const data = await response.json();
+                            result.textContent = JSON.stringify(data, null, 2);
+                        } catch (err) {
+                            result.textContent = 'Error: ' + err.message;
+                        }
+                    }
+                    
+                    async function checkWhitelist() {
+                        const host = document.getElementById('checkHost').value;
+                        const result = document.getElementById('whitelistResult');
+                        result.textContent = 'Checking...';
+                        
+                        try {
+                            const response = await fetch('/check-whitelist', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-Check-Host': host
+                                }
+                            });
+                            const data = await response.json();
+                            result.textContent = JSON.stringify(data, null, 2);
+                        } catch (err) {
+                            result.textContent = 'Error: ' + err.message;
+                        }
+                    }
+                </script>
+            </body>
+            </html>
+        `);
+        return;
+    }
+
+    // ローカルホスト以外のリクエストは許可
+    if (!req.headers.host.includes('localhost:8000')) {
+        return;
+    }
+
+    // ローカルホストへの直接リクエストを拒否
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('直接のローカルホストへのリクエストは許可されていません');
+});
