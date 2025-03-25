@@ -43,11 +43,9 @@ const whitelistedRegexPatterns = whitelistManager.regexPatterns;
 // キャッシュディレクトリの初期化
 const initializeCacheDir = async () => {
     try {
-        await fs.promises.mkdir(CACHE_DIR, { recursive: true });
-        await fs.promises.chmod(CACHE_DIR, 0o777);
-        logger.log('キャッシュディレクトリを初期化しました');
+        await cacheManager.initialize();
     } catch (err) {
-        logger.error('キャッシュディレクトリの初期化エラー:', err);
+        logger.error('初期化エラー:', err);
         throw err;
     }
 };
@@ -84,51 +82,12 @@ const httpsOptions = {
 
 // キャッシュのロード - エラー時にファイル削除を追加
 const loadCache = async (cacheFile) => {
-    try {
-        const data = await fs.promises.readFile(`${cacheFile}.cache`, 'utf8');
-        const cache = JSON.parse(data);
-        if(cache.href){
-            const cacheDir = path.dirname(cacheFile);
-            const filename = path.join(cacheDir, cache.href);
-            const body = await fs.promises.readFile(filename);
-            cache.data = body.toString('base64');
-        }
-
-        logger.debug('キャッシュをロードしました:', cache.url);
-        return cache;
-    } catch (err) {
-        logger.error('キャッシュの読み込みエラー:', err);
-        
-        // キャッシュファイルが破損している場合は削除する
-        try {
-            logger.error(`破損したキャッシュファイルを削除: ${cacheFile}`);
-            await fs.promises.unlink(cacheFile);
-            await fs.promises.unlink(`${cacheFile}.cache`);
-        } catch (unlinkErr) {
-            logger.error('キャッシュファイル削除エラー:', unlinkErr);
-        }
-        
-        return null;
-    }
+    return cacheManager.loadCache(cacheFile);
 };
 
 // キャッシュの保存
 const saveCache = async (cacheFile, cacheHeader, body) => {
-    try {
-        const cacheDir = path.dirname(cacheFile);
-        const filename = path.basename(cacheFile);
-        await fs.promises.mkdir(cacheDir, { recursive: true });
-        await fs.promises.chmod(cacheDir, 0o777);
-        cacheHeader.href=filename;
-        await fs.promises.writeFile(`${cacheFile}.cache`, JSON.stringify(cacheHeader, null, 2));
-        await fs.promises.writeFile(cacheFile, body);
-        await fs.promises.chmod(`${cacheFile}.cache`, 0o666);
-        await fs.promises.chmod(cacheFile, 0o666);
-
-        logger.debug('キャッシュを保存しました:', cacheHeader.url, `${cacheFile}.cache`,`${cacheFile}`);
-    } catch (err) {
-        logger.error('キャッシュの保存エラー:', err);
-    }
+    return cacheManager.saveCache(cacheFile, cacheHeader, body);
 };
 
 // 定期的な統計情報のログ出力を開始
@@ -3396,138 +3355,14 @@ function createTransparentTunnel(clientSocket, targetHost, targetPort, head) {
     });
 }
 
-// ユーティリティ関数：キャッシュファイルのエラーチェックと修復
-async function checkAndRepairCacheFile(cacheFile) {
-    try {
-        // ファイルが存在するか確認
-        const exists = await fileExists(cacheFile);
-        if (!exists) {
-            return false;
-        }
-        
-        // ファイルを読み込んでJSONとして解析
-        const data = await fs.promises.readFile(cacheFile, 'utf8');
-        try {
-            const cache = JSON.parse(data);
-            
-            // 必要なプロパティがすべて存在するか確認
-            if (!cache.url || !cache.statusCode || !cache.headers || !cache.data) {
-                logger.warn(`キャッシュファイル形式不正: ${cacheFile} - 削除します`);
-                await fs.promises.unlink(cacheFile);
-                return false;
-            }
-            
-            // Base64データをデコードしてみる
-            try {
-                const decodedData = Buffer.from(cache.data, 'base64');
-                if (decodedData.length === 0 && cache.data.length > 0) {
-                    // Base64デコードに失敗した可能性が高い
-                    logger.warn(`キャッシュデータのBase64デコードに失敗: ${cacheFile} - 削除します`);
-                    await fs.promises.unlink(cacheFile);
-                    return false;
-                }
-            } catch (decodeErr) {
-                logger.warn(`キャッシュデータのBase64デコードエラー: ${cacheFile} - 削除します`, decodeErr);
-                await fs.promises.unlink(cacheFile);
-                return false;
-            }
-            
-            return true;
-        } catch (jsonErr) {
-            // JSON解析エラー - ファイルが破損している
-            logger.warn(`キャッシュファイルのJSON解析エラー: ${cacheFile} - 削除します`);
-            await fs.promises.unlink(cacheFile);
-            return false;
-        }
-    } catch (err) {
-        logger.error(`キャッシュファイルチェックエラー: ${cacheFile}`, err);
-        
-        // エラー発生時もファイル削除を試行
-        try {
-            await fs.promises.unlink(cacheFile);
-            logger.warn(`エラーが発生したキャッシュファイルを削除: ${cacheFile}`);
-        } catch (unlinkErr) {
-            // 削除エラーは無視
-        }
-        
-        return false;
-    }
-}
-
-// キャッシュディレクトリ内の破損ファイルを定期的にクリーンアップ
-async function cleanupCorruptedCacheFiles() {
-    try {
-        // キャッシュディレクトリ内のファイル一覧を取得
-        const files = await fs.promises.readdir(CACHE_DIR);
-        
-        let checkedCount = 0;
-        let removedCount = 0;
-        
-        // ファイル数が多い場合は一部だけチェック
-        const filesToCheck = files.length > 100 ? 
-            files.sort(() => Math.random() - 0.5).slice(0, 100) : // ランダムに100ファイルを選択
-            files;
-        
-        for (const file of filesToCheck) {
-            if (!file.endsWith('.cache')) continue;
-            
-            checkedCount++;
-            const cacheFile = path.join(CACHE_DIR, file);
-            
-            const isValid = await checkAndRepairCacheFile(cacheFile);
-            if (!isValid) {
-                removedCount++;
-            }
-        }
-        
-        if (removedCount > 0) {
-            logger.info(`キャッシュ整合性チェック完了: ${checkedCount}ファイルをチェック、${removedCount}ファイルを削除`);
-        }
-    } catch (err) {
-        logger.error('キャッシュクリーンアップエラー:', err);
-    }
-}
-
-// 起動時に一度実行し、その後は定期的に破損キャッシュファイルをクリーンアップ
-setTimeout(cleanupCorruptedCacheFiles, 10000); // 起動から10秒後に初回実行
-setInterval(cleanupCorruptedCacheFiles, 1800000); // その後30分ごとに実行
-
 // URLからキャッシュファイル名を生成する関数をローカルではなく、グローバルにする
 const getCacheFileName = (requestUrl, headers = {}) => {
-    try {
-        let url;
-        if (requestUrl.startsWith('http://') || requestUrl.startsWith('https://')) {
-            url = new URL(requestUrl);
-        } else {
-            const host = headers.host || 'localhost';
-            url = new URL(requestUrl.startsWith('/') ? `http://${host}${requestUrl}` : `http://${host}/${requestUrl}`);
-        }
-        // クエリパラメータも含めて正規化URLを生成
-        const normalizedUrl = `${url.protocol}//${url.host}${url.pathname}${url.search}`;
-        const hash = crypto.createHash('md5').update(normalizedUrl).digest('hex');
-        const filePath = url.pathname;
-        
-        const filenameWithExt = path.basename(filePath) || 'index.html';
-        const filenameWithoutExt = path.parse(filenameWithExt).name;
-        const extname = path.extname(filenameWithExt);
-        const filename = `${filenameWithoutExt}-${hash}${extname}`;
-        const dirPath = path.dirname(filePath);
-        
-        return path.join(CACHE_DIR, url.host, dirPath, `${filename}`);
-    } catch (err) {
-        logger.error('URLの正規化エラー:', err, requestUrl);
-        throw err;
-    }
+    return cacheManager.getCacheFileName(requestUrl, headers);
 };
 
 // ファイルが存在するか確認するヘルパー関数
 const fileExists = async (filePath) => {
-    try {
-        await fs.promises.access(filePath);
-        return true;
-    } catch (err) {
-        return false;
-    }
+    return cacheManager.fileExists(filePath);
 };
 
 // 統計とヘルスチェック用のエンドポイントを更新

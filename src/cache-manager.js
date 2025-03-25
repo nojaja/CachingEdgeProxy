@@ -114,6 +114,7 @@ class CacheManager {
      * @param {string} cacheFile キャッシュファイルパス
      * @param {Object} cacheHeader キャッシュヘッダー情報
      * @param {Buffer} body レスポンスボディ
+     * @returns {Promise<boolean>} 保存成功したらtrue
      */
     async saveCache(cacheFile, cacheHeader, body) {
         try {
@@ -128,8 +129,10 @@ class CacheManager {
             await fs.promises.chmod(cacheFile, 0o666);
 
             this.logger.debug('キャッシュを保存しました:', cacheHeader.url, `${cacheFile}.cache`,`${cacheFile}`);
+            return true;
         } catch (err) {
             this.logger.error('キャッシュの保存エラー:', err);
+            return false;
         }
     }
     
@@ -160,30 +163,27 @@ class CacheManager {
                 return false;
             }
             
-            // ファイルを読み込んでJSONとして解析
-            const data = await fs.promises.readFile(cacheFile, 'utf8');
+            // ファイルを読み込んでJSONとして解析 (.cacheファイル)
             try {
+                const data = await fs.promises.readFile(`${cacheFile}.cache`, 'utf8');
                 const cache = JSON.parse(data);
                 
                 // 必要なプロパティがすべて存在するか確認
-                if (!cache.url || !cache.statusCode || !cache.headers || !cache.data) {
+                if (!cache.url || !cache.statusCode || !cache.headers || !cache.href) {
                     this.logger.warn(`キャッシュファイル形式不正: ${cacheFile} - 削除します`);
                     await fs.promises.unlink(cacheFile);
+                    await fs.promises.unlink(`${cacheFile}.cache`);
                     return false;
                 }
                 
-                // Base64データをデコードしてみる
+                // キャッシュファイルの存在チェック
                 try {
-                    const decodedData = Buffer.from(cache.data, 'base64');
-                    if (decodedData.length === 0 && cache.data.length > 0) {
-                        // Base64デコードに失敗した可能性が高い
-                        this.logger.warn(`キャッシュデータのBase64デコードに失敗: ${cacheFile} - 削除します`);
-                        await fs.promises.unlink(cacheFile);
-                        return false;
-                    }
-                } catch (decodeErr) {
-                    this.logger.warn(`キャッシュデータのBase64デコードエラー: ${cacheFile} - 削除します`, decodeErr);
-                    await fs.promises.unlink(cacheFile);
+                    const cacheDir = path.dirname(cacheFile);
+                    const bodyFile = path.join(cacheDir, cache.href);
+                    await fs.promises.access(bodyFile);
+                } catch (accessErr) {
+                    this.logger.warn(`キャッシュボディファイルが見つかりません: ${cacheFile} - 削除します`);
+                    await fs.promises.unlink(`${cacheFile}.cache`);
                     return false;
                 }
                 
@@ -191,7 +191,12 @@ class CacheManager {
             } catch (jsonErr) {
                 // JSON解析エラー - ファイルが破損している
                 this.logger.warn(`キャッシュファイルのJSON解析エラー: ${cacheFile} - 削除します`);
-                await fs.promises.unlink(cacheFile);
+                await fs.promises.unlink(`${cacheFile}.cache`);
+                try {
+                    await fs.promises.unlink(cacheFile);
+                } catch (e) {
+                    // ファイルが既に存在しない場合は無視
+                }
                 return false;
             }
         } catch (err) {
@@ -199,6 +204,7 @@ class CacheManager {
             
             // エラー発生時もファイル削除を試行
             try {
+                await fs.promises.unlink(`${cacheFile}.cache`);
                 await fs.promises.unlink(cacheFile);
                 this.logger.warn(`エラーが発生したキャッシュファイルを削除: ${cacheFile}`);
             } catch (unlinkErr) {
@@ -211,27 +217,42 @@ class CacheManager {
     
     /**
      * 破損したキャッシュファイルをクリーンアップ
+     * @param {number} maxFiles 一度に処理する最大ファイル数
      */
-    async cleanupCorruptedCacheFiles() {
+    async cleanupCorruptedCacheFiles(maxFiles = 100) {
         try {
-            // キャッシュディレクトリ内のファイル一覧を取得
-            const files = await fs.promises.readdir(this.CACHE_DIR);
+            // キャッシュディレクトリが存在しない場合は作成
+            await fs.promises.mkdir(this.CACHE_DIR, { recursive: true });
+            
+            // キャッシュディレクトリ内のすべてのファイルと再帰的にサブディレクトリを取得
+            const getAllFiles = async (dir) => {
+                const dirents = await fs.promises.readdir(dir, { withFileTypes: true });
+                const files = await Promise.all(dirents.map((dirent) => {
+                    const res = path.resolve(dir, dirent.name);
+                    return dirent.isDirectory() ? getAllFiles(res) : res;
+                }));
+                return files.flat();
+            };
+            
+            const files = await getAllFiles(this.CACHE_DIR);
+            
+            // .cacheファイルのみをフィルタリング
+            const cacheFiles = files.filter(file => file.endsWith('.cache'));
             
             let checkedCount = 0;
             let removedCount = 0;
             
-            // ファイル数が多い場合は一部だけチェック
-            const filesToCheck = files.length > 100 ? 
-                files.sort(() => Math.random() - 0.5).slice(0, 100) : // ランダムに100ファイルを選択
-                files;
+            // ファイル数が多い場合はランダムに選択
+            const filesToCheck = cacheFiles.length > maxFiles ? 
+                cacheFiles.sort(() => Math.random() - 0.5).slice(0, maxFiles) : 
+                cacheFiles;
             
-            for (const file of filesToCheck) {
-                if (!file.endsWith('.cache')) continue;
-                
+            for (const cacheFile of filesToCheck) {
                 checkedCount++;
-                const cacheFile = path.join(this.CACHE_DIR, file);
+                // キャッシュファイルのパスから.cacheを取り除いたパスを生成
+                const dataFile = cacheFile.replace(/\.cache$/, '');
                 
-                const isValid = await this.checkAndRepairCacheFile(cacheFile);
+                const isValid = await this.checkAndRepairCacheFile(dataFile);
                 if (!isValid) {
                     removedCount++;
                 }
@@ -250,25 +271,144 @@ class CacheManager {
      */
     async clearAllCache() {
         try {
-            const files = await fs.promises.readdir(this.CACHE_DIR);
-            let deletedCount = 0;
-            const errors = [];
-            
-            for (const file of files) {
+            // 再帰的にファイルを削除する関数
+            const removeFiles = async (directory) => {
                 try {
-                    await fs.promises.unlink(path.join(this.CACHE_DIR, file));
-                    deletedCount++;
-                } catch (unlinkErr) {
-                    errors.push(`${file}: ${unlinkErr.message}`);
+                    const files = await fs.promises.readdir(directory);
+                    let deletedCount = 0;
+                    const errors = [];
+
+                    for (const file of files) {
+                        const fullPath = path.join(directory, file);
+                        const stats = await fs.promises.stat(fullPath);
+                        
+                        if (stats.isDirectory()) {
+                            // 再帰的にディレクトリ内ファイルを削除
+                            const result = await removeFiles(fullPath);
+                            deletedCount += result.deletedCount;
+                            errors.push(...result.errors);
+                            
+                            // 空になったディレクトリを削除
+                            try {
+                                await fs.promises.rmdir(fullPath);
+                            } catch (err) {
+                                errors.push(`ディレクトリ削除エラー ${fullPath}: ${err.message}`);
+                            }
+                        } else {
+                            // ファイルを削除
+                            try {
+                                await fs.promises.unlink(fullPath);
+                                deletedCount++;
+                            } catch (err) {
+                                errors.push(`${file}: ${err.message}`);
+                            }
+                        }
+                    }
+
+                    return { deletedCount, errors };
+                } catch (err) {
+                    return { deletedCount: 0, errors: [err.message] };
                 }
-            }
+            };
             
-            this.logger.info(`キャッシュクリア: ${deletedCount}ファイルを削除しました。エラー: ${errors.length}件`);
-            return { deletedCount, errors };
+            const result = await removeFiles(this.CACHE_DIR);
+            this.logger.info(`キャッシュクリア: ${result.deletedCount}ファイルを削除しました。エラー: ${result.errors.length}件`);
+            return result;
         } catch (err) {
             this.logger.error('キャッシュクリアエラー:', err);
             throw err;
         }
+    }
+
+    /**
+     * キャッシュの状態統計を取得
+     * @returns {Promise<Object>} キャッシュ統計情報
+     */
+    async getCacheStats() {
+        try {
+            let totalFiles = 0;
+            let totalSize = 0;
+            
+            const processDir = async (dir) => {
+                try {
+                    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+                    
+                    for (const entry of entries) {
+                        const fullPath = path.join(dir, entry.name);
+                        
+                        if (entry.isDirectory()) {
+                            await processDir(fullPath);
+                        } else {
+                            totalFiles++;
+                            try {
+                                const stats = await fs.promises.stat(fullPath);
+                                totalSize += stats.size;
+                            } catch (err) {
+                                this.logger.error(`ファイル情報取得エラー: ${fullPath}`, err);
+                            }
+                        }
+                    }
+                } catch (err) {
+                    this.logger.error(`ディレクトリ読み取りエラー: ${dir}`, err);
+                }
+            };
+            
+            await processDir(this.CACHE_DIR);
+            
+            return {
+                totalFiles,
+                totalSize,
+                formattedSize: this.formatBytes(totalSize)
+            };
+        } catch (err) {
+            this.logger.error('キャッシュ統計情報取得エラー:', err);
+            return {
+                totalFiles: 0,
+                totalSize: 0,
+                formattedSize: '0 B'
+            };
+        }
+    }
+    
+    /**
+     * バイト数を読みやすい形式に変換
+     * @param {number} bytes バイト数
+     * @param {number} decimals 小数点以下の桁数
+     * @returns {string} フォーマットされたサイズ文字列
+     */
+    formatBytes(bytes, decimals = 2) {
+        if (bytes === 0) return '0 B';
+        
+        const k = 1024;
+        const dm = decimals < 0 ? 0 : decimals;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+        
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+    }
+
+    /**
+     * URLがキャッシュされているか確認
+     * @param {string} url 確認するURL
+     * @returns {Promise<boolean>} キャッシュが存在すればtrue
+     */
+    async isCached(url) {
+        const cacheFile = this.getCacheFileName(url);
+        return await this.fileExists(`${cacheFile}.cache`);
+    }
+
+    /**
+     * キャッシュを取得
+     * @param {string} url 取得するURL
+     * @returns {Promise<Object|null>} キャッシュオブジェクトまたはnull
+     */
+    async getCache(url) {
+        const cacheFile = this.getCacheFileName(url);
+        if (await this.fileExists(`${cacheFile}.cache`)) {
+            return await this.loadCache(cacheFile);
+        }
+        return null;
     }
 }
 
