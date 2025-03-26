@@ -65,11 +65,33 @@ class ApiEndpoints {
     handleStats(req, res) {
         if (req.url === '/proxy-stats' && req.headers.host.includes('localhost')) {
             res.writeHead(200, {'Content-Type': 'application/json'});
+            
+            // 統計データを取得
+            const rawStats = this.statsCollector.getStats();
+            
+            // テスト互換性のために形式を調整
             const statsData = {
-                ...this.statsCollector.getStats(),
+                stats: {
+                    requests: rawStats.http.requests,  // テストケースが期待するプロパティ名
+                    httpRequests: rawStats.http.requests, // 追加のプロパティとして保持
+                    httpsRequests: rawStats.https.requests, 
+                    cacheHits: rawStats.http.cacheHits,
+                    cacheMisses: rawStats.http.cacheMisses
+                },
+                httpsStats: {
+                    connections: rawStats.https.connections,
+                    cacheHits: rawStats.https.cacheHits,
+                    cacheMisses: rawStats.https.cacheMisses,
+                    cacheSaves: rawStats.https.cacheSaves
+                },
+                activeConnections: rawStats.activeConnections,
+                timestamp: rawStats.timestamp,
+                uptime: rawStats.uptime,
+                memoryUsage: rawStats.memoryUsage,
                 whitelistedDomains: this.whitelistManager.getAllDomains(),
                 whitelistedRegexPatterns: this.whitelistManager.getAllRegexPatterns()
             };
+            
             res.end(JSON.stringify(statsData, null, 2));
             return true;
         }
