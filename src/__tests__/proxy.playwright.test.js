@@ -8,7 +8,8 @@ const crypto = require('crypto');
 const { URL } = require('url');
 const execAsync = promisify(exec);
 
-jest.setTimeout(60000); // タイムアウトを60秒に設定
+// Jest環境でのタイムアウト設定
+jest.setTimeout(60000); // グローバルタイムアウトを60秒に設定
 
 let proxyServer;
 let proxyPort;
